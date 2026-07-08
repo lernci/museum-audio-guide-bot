@@ -1,0 +1,6 @@
+aiogram>=3.4
+aiosqlite>=0.19
+anthropic>=0.40
+qrcode[pil]>=7.4
+openai>=1.30
+python-dotenv>=1.0
