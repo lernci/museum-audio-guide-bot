@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.env
+*.sqlite3
+tmp_audio/
+qr_codes/
+tts_samples/
