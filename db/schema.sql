@@ -67,6 +67,26 @@ CREATE TABLE audio_cache (
                           CHECK (status IN ('pending', 'generating', 'ready', 'failed')),
     error_message        TEXT,
     generated_at         TIMESTAMPTZ,
+    -- ── staged web workflow (draft/publish separation) ──────────────────
+    -- The columns above are the PUBLISHED snapshot visitors are served from
+    -- (bot/visitor.py reads them unchanged). Everything below is the staff's
+    -- work-in-progress copy: the web admin panel's Stage 2/3 actions only
+    -- ever write here, never to the published columns above. Publishing
+    -- copies draft_* -> the published columns in one shot (db.promote_draft_to_live),
+    -- which is the only thing that can change what a visitor is served.
+    -- This is what makes "exhibit stays live with old content while staff
+    -- edit/regenerate it" true without any extra locking.
+    script_stale         INTEGER NOT NULL DEFAULT 1,  -- draft script doesn't match current Armenian source
+    audio_stale          INTEGER NOT NULL DEFAULT 1,  -- draft audio doesn't match current draft script
+    draft_script_text    TEXT,
+    draft_title_translated TEXT,
+    draft_tts_provider   TEXT,
+    draft_voice_id       TEXT,
+    draft_telegram_file_id TEXT,
+    draft_telegram_file_unique_id TEXT,
+    draft_duration_seconds REAL,
+    draft_status         TEXT,                      -- NULL/pending/generating/ready/failed
+    draft_error_message  TEXT,
     UNIQUE (exhibit_id, language_code)
 );
 

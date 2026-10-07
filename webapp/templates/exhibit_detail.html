@@ -3,18 +3,6 @@
 {% block content %}
 <div class="page-header">
   <h1>Exhibit {{ exhibit['id'] }} <span class="badge badge-{{ exhibit['status'] }}">{{ exhibit['status'] }}</span></h1>
-  <div class="actions">
-    {% if exhibit['status'] in ('review', 'unpublished') %}
-    <form method="post" action="{{ request.url_for('exhibit_publish', exhibit_id=exhibit['id']) }}">
-      <button type="submit" class="btn btn-publish">Publish</button>
-    </form>
-    {% endif %}
-    {% if exhibit['status'] == 'live' %}
-    <form method="post" action="{{ request.url_for('exhibit_unpublish', exhibit_id=exhibit['id']) }}">
-      <button type="submit" class="btn btn-unpublish">Unpublish</button>
-    </form>
-    {% endif %}
-  </div>
 </div>
 
 {% if exhibit['deep_link'] %}
@@ -24,57 +12,99 @@
 </div>
 {% endif %}
 
-<section class="photos">
-  {% for p in photos %}
-  <img src="{{ request.url_for('media_photo', exhibit_id=exhibit['id'], index=loop.index0) }}" alt="Exhibit photo">
-  {% endfor %}
+{% if generate_error %}<p class="error">Script generation failed: {{ generate_error }}</p>{% endif %}
+
+<!-- ── Stage 1 — Source ─────────────────────────────────────────────── -->
+<section class="stage">
+  <h2>Stage 1 — Source (Armenian)</h2>
+  <p class="hint">Saving here only persists — it marks every language's script and audio as outdated,
+    but doesn't generate anything. Run Stage 2 below when ready.</p>
+  <section class="photos">
+    {% for p in photos %}
+    <img src="{{ request.url_for('media_photo', exhibit_id=exhibit['id'], index=loop.index0) }}" alt="Exhibit photo">
+    {% endfor %}
+  </section>
+  <form method="post" action="{{ request.url_for('exhibit_save_source', exhibit_id=exhibit['id']) }}" enctype="multipart/form-data" class="exhibit-form">
+    <label>Title (Armenian)
+      <input type="text" name="title_am" value="{{ exhibit['title_am'] }}" required>
+    </label>
+    <label>Replace photos (leave empty to keep current)
+      <input type="file" name="photos" accept="image/*" multiple>
+    </label>
+    <label>Fact sheet (Armenian)
+      <textarea name="fact_sheet_text" rows="8" required>{{ exhibit['fact_sheet_am'] }}</textarea>
+    </label>
+    <label>…or attach a replacement .txt / .docx file
+      <input type="file" name="fact_sheet_file" accept=".txt,.docx">
+    </label>
+    <button type="submit" class="btn">Save</button>
+  </form>
 </section>
 
-<section class="languages">
-  <h2>Languages</h2>
+<!-- ── Stage 2+3 — Scripts & Audio ──────────────────────────────────── -->
+<section class="stage">
+  <h2>Stage 2 — Scripts &amp; Stage 3 — Audio</h2>
+  <div class="stage-actions">
+    <form method="post" action="{{ request.url_for('exhibit_generate_scripts', exhibit_id=exhibit['id']) }}">
+      <button type="submit" class="btn">Generate scripts</button>
+    </form>
+    <form method="post" action="{{ request.url_for('exhibit_generate_audio', exhibit_id=exhibit['id']) }}">
+      <button type="submit" class="btn">Generate audio</button>
+    </form>
+  </div>
+  <p class="hint">"Generate scripts" makes one call that writes a fresh script for all 10 languages.
+    "Generate audio" only re-voices languages whose audio is missing or outdated — already-good ones are left alone.</p>
+
   <div class="lang-grid">
     {% for code, label in LANGUAGE_LABELS.items() %}
     {% set row = audio_rows.get(code) %}
-    <div class="lang-card lang-{{ row['status'] if row else 'pending' }}">
+    <div class="lang-card">
       <h3>{{ label }}</h3>
-      {% if row %}
-        <p class="lang-status">{{ row['status'] }}</p>
-        {% if row['title_translated'] %}<p class="lang-title">{{ row['title_translated'] }}</p>{% endif %}
-        {% if row['status'] == 'ready' %}
-          <audio controls src="{{ request.url_for('media_audio', exhibit_id=exhibit['id'], lang=code) }}"></audio>
-        {% endif %}
-        {% if row['script_text'] %}<details><summary>Script</summary><p>{{ row['script_text'] }}</p></details>{% endif %}
-        {% if row['status'] == 'failed' %}
-          <form method="post" action="{{ request.url_for('exhibit_retry', exhibit_id=exhibit['id'], lang=code) }}">
-            <button type="submit" class="link-btn">Retry</button>
-          </form>
-          {% if row['error_message'] %}<p class="error small">{{ row['error_message'] }}</p>{% endif %}
-        {% endif %}
+      {% if not row or not row['draft_script_text'] %}
+        <p class="badge badge-missing">no script yet</p>
       {% else %}
-        <p class="lang-status">not generated yet</p>
+        {% if row['script_stale'] %}<p class="badge badge-stale">source changed — regenerate scripts</p>{% endif %}
+        <form method="post" action="{{ request.url_for('exhibit_save_script', exhibit_id=exhibit['id'], lang=code) }}" class="script-form">
+          <input type="text" name="title_translated" value="{{ row['draft_title_translated'] or '' }}" placeholder="Localized title">
+          <textarea name="script_text" rows="6">{{ row['draft_script_text'] }}</textarea>
+          <button type="submit" class="link-btn">Save this language's script</button>
+        </form>
+
+        {% if row['audio_stale'] %}<p class="badge badge-stale">audio outdated — regenerate audio</p>{% endif %}
+        {% if row['draft_status'] == 'ready' %}
+          <audio controls src="{{ request.url_for('media_audio', exhibit_id=exhibit['id'], lang=code) }}"></audio>
+        {% elif row['draft_status'] == 'failed' %}
+          <p class="error small">Audio failed: {{ row['draft_error_message'] }} (will retry on next "Generate audio")</p>
+        {% elif not row['audio_stale'] %}
+          <p class="lang-status">no audio yet</p>
+        {% endif %}
       {% endif %}
     </div>
     {% endfor %}
   </div>
 </section>
 
-<section class="edit">
-  <h2>Edit</h2>
-  <p class="hint">Saving changes resets this exhibit to draft and regenerates every language.</p>
-  <form method="post" action="{{ request.url_for('exhibit_edit', exhibit_id=exhibit['id']) }}" enctype="multipart/form-data" class="exhibit-form">
-    <label>Title (Armenian)
-      <input type="text" name="title_am" value="{{ exhibit['title_am'] }}">
-    </label>
-    <label>Replace photos (leave empty to keep current)
-      <input type="file" name="photos" accept="image/*" multiple>
-    </label>
-    <label>Fact sheet (Armenian)
-      <textarea name="fact_sheet_text" rows="8">{{ exhibit['fact_sheet_am'] }}</textarea>
-    </label>
-    <label>…or attach a replacement .txt / .docx file
-      <input type="file" name="fact_sheet_file" accept=".txt,.docx">
-    </label>
-    <button type="submit" class="btn">Save &amp; regenerate</button>
+<!-- ── Stage 4 — Publish ────────────────────────────────────────────── -->
+<section class="stage">
+  <h2>Stage 4 — Publish</h2>
+  {% if publish_problems %}
+    <p class="error">Not ready to publish — pending:</p>
+    <ul class="error">
+      {% for p in publish_problems %}<li>{{ p }}</li>{% endfor %}
+    </ul>
+    <button type="button" class="btn" disabled>Publish</button>
+  {% else %}
+    <form method="post" action="{{ request.url_for('exhibit_publish', exhibit_id=exhibit['id']) }}">
+      <button type="submit" class="btn btn-publish">Publish</button>
+    </form>
+  {% endif %}
+  {% if exhibit['status'] == 'live' %}
+  <form method="post" action="{{ request.url_for('exhibit_unpublish', exhibit_id=exhibit['id']) }}">
+    <button type="submit" class="btn btn-unpublish">Unpublish</button>
   </form>
+  <p class="hint">Unpublishing hides the exhibit from visitors immediately. Publishing again (once everything above is current) goes straight back live.</p>
+  {% else %}
+  <p class="hint">Publishing copies the scripts and audio above onto what visitors are served. If this exhibit is already live, it keeps serving its current content until you publish again.</p>
+  {% endif %}
 </section>
 {% endblock %}

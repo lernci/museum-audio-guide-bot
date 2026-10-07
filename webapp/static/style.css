@@ -111,6 +111,22 @@ a { color: var(--accent); }
 .badge-failed { background: rgba(224, 90, 79, 0.18); color: var(--danger); }
 .badge-unpublished { background: rgba(224, 90, 79, 0.12); color: var(--danger); }
 .badge-processing, .badge-draft { background: rgba(79, 140, 255, 0.15); color: var(--accent); }
+.badge-stale { background: rgba(224, 163, 58, 0.18); color: var(--warn); margin: 4px 0; }
+.badge-missing { background: var(--border); color: var(--muted); margin: 4px 0; }
+
+.stage {
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.stage-actions { display: flex; gap: 8px; margin: 12px 0; }
+.script-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+}
+.script-form textarea { font-size: 0.85rem; }
 
 .qr-block { display: flex; align-items: center; gap: 14px; margin: 16px 0; }
 .qr-img { width: 110px; height: 110px; background: #fff; border-radius: 8px; padding: 6px; }
@@ -130,13 +146,8 @@ a { color: var(--accent); }
   border-radius: 10px;
   padding: 12px;
 }
-.lang-card.lang-ready { border-color: rgba(56, 176, 106, 0.4); }
-.lang-card.lang-failed { border-color: rgba(224, 90, 79, 0.5); }
 .lang-status { color: var(--muted); font-size: 0.8rem; margin: 0 0 6px; text-transform: uppercase; }
-.lang-title { font-weight: 500; margin: 0 0 8px; }
 .lang-card audio { width: 100%; margin: 6px 0; }
-.lang-card details { font-size: 0.85rem; color: var(--muted); margin-top: 6px; }
-.lang-card details p { color: var(--text); white-space: pre-wrap; }
 
 .exhibit-form, .login-card form {
   display: flex;
@@ -171,8 +182,3 @@ textarea { resize: vertical; }
   padding: 28px;
 }
 
-section.edit {
-  margin-top: 36px;
-  padding-top: 20px;
-  border-top: 1px solid var(--border);
-}

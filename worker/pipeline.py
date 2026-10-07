@@ -29,7 +29,7 @@ from db import db
 from utils.audio import to_telegram_voice, probe_duration_seconds
 from utils.hayq_tts import synthesize_apittshy
 from utils.qr import build_deep_link, generate_qr_png
-from worker.prompts import SYSTEM_PROMPT, build_user_message, SUBMIT_SCRIPTS_TOOL
+from worker.prompts import SYSTEM_PROMPT, build_user_message, SUBMIT_SCRIPTS_TOOL, LANGUAGES
 
 TMP_DIR = Path("tmp_audio")
 QR_DIR = Path("qr_codes")
@@ -175,11 +175,14 @@ async def _generate_scripts(exhibit_id: str, title_am: str, fact_sheet_am: str) 
     return json.loads(tool_calls[0].function.arguments)["scripts"]
 
 
-async def _tts_and_cache(bot, exhibit_id: str, lang: str, title_translated: str, script_text: str) -> None:
+async def _synthesize_and_upload(bot, exhibit_id: str, lang: str, script_text: str) -> dict:
+    """Synth -> ffmpeg -> upload to the log channel. Shared by both the old
+    monolithic Telegram-FSM pipeline and the web admin's staged draft
+    generation — everything above this (which columns the result lands in)
+    is the caller's concern, not this function's."""
     provider = TTS_ROUTING[lang]
     raw_path = TMP_DIR / f"{exhibit_id}_{lang}_raw"
     ogg_path = TMP_DIR / f"{exhibit_id}_{lang}.ogg"
-
     try:
         if provider == "local_am":
             raw_path, voice_id = await _synthesize_local_am(script_text, raw_path)
@@ -190,34 +193,61 @@ async def _tts_and_cache(bot, exhibit_id: str, lang: str, title_translated: str,
 
         await to_telegram_voice(raw_path, ogg_path)
         duration = await probe_duration_seconds(ogg_path)
-
         sent = await bot.send_voice(LOG_CHANNEL_ID, voice=FSInputFile(ogg_path))
+        return {
+            "tts_provider": provider,
+            "voice_id": voice_id,
+            "telegram_file_id": sent.voice.file_id,
+            "telegram_file_unique_id": sent.voice.file_unique_id,
+            "duration_seconds": duration,
+        }
+    finally:
+        raw_path.unlink(missing_ok=True)
+        ogg_path.unlink(missing_ok=True)
+
+
+async def _tts_and_cache(bot, exhibit_id: str, lang: str, title_translated: str, script_text: str) -> None:
+    try:
+        result = await _synthesize_and_upload(bot, exhibit_id, lang, script_text)
         await db.upsert_audio_cache(
             exhibit_id, lang,
             script_text=script_text,
             title_translated=title_translated,
-            tts_provider=provider,
-            voice_id=voice_id,
-            telegram_file_id=sent.voice.file_id,
-            telegram_file_unique_id=sent.voice.file_unique_id,
-            duration_seconds=duration,
             status="ready",
             error_message=None,  # clear any stale error from a prior failed attempt
+            **result,
         )
         await db.mark_jobs_by_type(exhibit_id, "tts", status="success", language_code=lang)
     except Exception as exc:
         # keep script_text/title on failure too — they're the expensive-to-regenerate
-        # part (a Claude call), TTS is what actually failed, so /retry can skip
+        # part (an OpenAI call), TTS is what actually failed, so /retry can skip
         # straight to TTS.
         await db.upsert_audio_cache(
             exhibit_id, lang, script_text=script_text, title_translated=title_translated,
-            tts_provider=provider, status="failed", error_message=str(exc),
+            tts_provider=TTS_ROUTING[lang], status="failed", error_message=str(exc),
         )
         await db.mark_jobs_by_type(exhibit_id, "tts", status="failed", language_code=lang, error_message=str(exc))
         raise
-    finally:
-        raw_path.unlink(missing_ok=True)
-        ogg_path.unlink(missing_ok=True)
+
+
+async def _tts_and_cache_draft(bot, exhibit_id: str, lang: str, title_translated: str, script_text: str) -> None:
+    """Web admin's Stage 3 equivalent of _tts_and_cache — writes the draft_*
+    shadow columns instead, so a live exhibit keeps serving its old audio
+    until Publish promotes this draft."""
+    try:
+        result = await _synthesize_and_upload(bot, exhibit_id, lang, script_text)
+        await db.upsert_audio_draft(
+            exhibit_id, lang,
+            script_text=script_text, title_translated=title_translated,
+            status="ready", error_message=None, **result,
+        )
+        await db.clear_audio_stale(exhibit_id, lang)
+    except Exception as exc:
+        await db.upsert_audio_draft(
+            exhibit_id, lang, script_text=script_text, title_translated=title_translated,
+            tts_provider=TTS_ROUTING[lang], status="failed", error_message=str(exc),
+        )
+        raise
 
 
 async def retry_language(bot, exhibit_id: str, lang: str) -> None:
@@ -240,6 +270,70 @@ async def retry_language(bot, exhibit_id: str, lang: str) -> None:
             bot,
             f"Exhibit {exhibit_id}: {lang} retried successfully, still failing: {', '.join(still_failed)}.",
         )
+
+
+# ── Web admin staged workflow ───────────────────────────────────────────
+# Stage 2 (Generate scripts), Stage 3 (Generate audio) and Publish, called
+# directly from webapp/app.py's routes — no queue, since each is a single
+# staff-initiated action the staff waits on, not a fire-and-forget job like
+# the Telegram FSM's enqueue_exhibit. All draft_* writes go through
+# db.upsert_audio_draft / db.save_draft_scripts; the published columns
+# bot/visitor.py reads are only ever touched by db.promote_draft_to_live.
+
+async def generate_scripts_draft(exhibit_id: str) -> None:
+    """Stage 2 — one OpenAI call, all 10 languages' draft scripts at once,
+    exactly like the old pipeline's translate step, just not auto-triggered."""
+    exhibit = await db.get_exhibit(exhibit_id)
+    scripts = await _generate_scripts(exhibit_id, exhibit["title_am"], exhibit["fact_sheet_am"])
+    await db.save_draft_scripts(exhibit_id, scripts)
+
+
+async def generate_audio_draft(bot, exhibit_id: str, langs: list[str]) -> list[str]:
+    """Stage 3 — TTS only for the given languages (the caller is expected to
+    have already filtered to missing-or-stale ones). Returns the subset that
+    failed. Reuses draft_script_text/draft_title_translated as the input —
+    whatever Stage 2 (or a manual per-language edit) most recently set."""
+    rows = await db.get_all_audio_rows(exhibit_id)
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TTS)
+
+    async def bound(lang: str):
+        row = rows[lang]
+        async with semaphore:
+            await _tts_and_cache_draft(bot, exhibit_id, lang, row["draft_title_translated"], row["draft_script_text"])
+
+    results = await asyncio.gather(*(bound(lang) for lang in langs), return_exceptions=True)
+    return [lang for lang, r in zip(langs, results) if isinstance(r, Exception)]
+
+
+def publish_readiness(rows: dict) -> list[str]:
+    """Checks every expected language's draft against the staleness rules
+    and returns a human-readable reason per language that isn't ready to
+    publish yet — empty list means Publish may proceed."""
+    problems = []
+    for code, name in LANGUAGES.items():
+        row = rows.get(code)
+        if row is None or row["draft_status"] != "ready":
+            problems.append(f"{name} ({code}): audio missing")
+        elif row["script_stale"]:
+            problems.append(f"{name} ({code}): script outdated — generate scripts")
+        elif row["audio_stale"]:
+            problems.append(f"{name} ({code}): audio outdated — generate audio")
+    return problems
+
+
+async def publish_draft(exhibit_id: str) -> list[str]:
+    """Publish — promotes every language's draft onto the published columns
+    in one shot, then flips the exhibit live. Refuses (returning the reasons)
+    if anything is stale or missing, so visitors can never get a half-updated
+    exhibit. Works identically whether this is the first publish or a
+    republish of an already-live exhibit."""
+    rows = await db.get_all_audio_rows(exhibit_id)
+    problems = publish_readiness(rows)
+    if problems:
+        return problems
+    await db.promote_draft_to_live(exhibit_id)
+    await db.set_exhibit_status(exhibit_id, "live")
+    return []
 
 
 # ── TTS provider adapters — fill in real SDK calls once vendor is picked ───

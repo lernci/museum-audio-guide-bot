@@ -55,6 +55,17 @@ FRESH_SCHEMA = [
                                  CHECK (status IN ('pending', 'generating', 'ready', 'failed')),
         error_message           TEXT,
         generated_at            TIMESTAMP,
+        script_stale            INTEGER NOT NULL DEFAULT 1,
+        audio_stale             INTEGER NOT NULL DEFAULT 1,
+        draft_script_text       TEXT,
+        draft_title_translated  TEXT,
+        draft_tts_provider      TEXT,
+        draft_voice_id          TEXT,
+        draft_telegram_file_id  TEXT,
+        draft_telegram_file_unique_id TEXT,
+        draft_duration_seconds  REAL,
+        draft_status            TEXT,
+        draft_error_message     TEXT,
         UNIQUE (exhibit_id, language_code)
     )""",
     "CREATE INDEX idx_audio_cache_exhibit ON audio_cache(exhibit_id)",
@@ -184,6 +195,26 @@ async def migrate() -> None:
 
         if "title_translated" not in await _columns(conn, "audio_cache"):
             await conn.execute("ALTER TABLE audio_cache ADD COLUMN title_translated TEXT")
+
+        # Staged web workflow (draft/publish separation) — see schema.sql's
+        # comment on these columns for why they exist.
+        audio_cols = await _columns(conn, "audio_cache")
+        draft_columns = [
+            ("script_stale", "INTEGER NOT NULL DEFAULT 1"),
+            ("audio_stale", "INTEGER NOT NULL DEFAULT 1"),
+            ("draft_script_text", "TEXT"),
+            ("draft_title_translated", "TEXT"),
+            ("draft_tts_provider", "TEXT"),
+            ("draft_voice_id", "TEXT"),
+            ("draft_telegram_file_id", "TEXT"),
+            ("draft_telegram_file_unique_id", "TEXT"),
+            ("draft_duration_seconds", "REAL"),
+            ("draft_status", "TEXT"),
+            ("draft_error_message", "TEXT"),
+        ]
+        for name, decl in draft_columns:
+            if name not in audio_cols:
+                await conn.execute(f"ALTER TABLE audio_cache ADD COLUMN {name} {decl}")
 
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.commit()

@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 
 import aiosqlite
 
+from worker.prompts import LANGUAGES
+
 DB_PATH = "museum_bot.sqlite3"
 
 
@@ -44,6 +46,18 @@ async def set_exhibit_qr(exhibit_id, qr_code_path, deep_link):
         await db.execute(
             "UPDATE exhibits SET qr_code_path = ?, deep_link = ? WHERE id = ?",
             (qr_code_path, deep_link, exhibit_id),
+        )
+        await db.commit()
+
+
+async def set_deep_link(exhibit_id, deep_link):
+    """Web flow's equivalent of set_exhibit_qr, minus the file path — the web
+    admin panel generates the QR image on demand (webapp/app.py's media_qr
+    route) instead of persisting a PNG to disk, so a redeploy or container
+    recreation can never leave it pointing at a file that no longer exists."""
+    async with get_conn() as db:
+        await db.execute(
+            "UPDATE exhibits SET deep_link = ? WHERE id = ?", (deep_link, exhibit_id)
         )
         await db.commit()
 
@@ -156,6 +170,121 @@ async def get_audio_row(exhibit_id, language_code):
             (exhibit_id, language_code),
         )
         return await cur.fetchone()
+
+
+async def ensure_audio_rows(exhibit_id):
+    """Creates the 10 (exhibit, language) rows if they don't exist yet, each
+    starting fully stale/missing — the correct starting state for a brand
+    new exhibit (nothing generated) and a no-op for one that already has
+    rows."""
+    async with get_conn() as db:
+        await db.executemany(
+            """INSERT OR IGNORE INTO audio_cache (exhibit_id, language_code, status)
+               VALUES (?, ?, 'pending')""",
+            [(exhibit_id, code) for code in LANGUAGES],
+        )
+        await db.commit()
+
+
+async def mark_source_edited(exhibit_id):
+    """Stage 1 (title/photos/fact sheet) changed — invalidates every
+    language's draft script AND draft audio, per the staged workflow's core
+    staleness rule. Ensures rows exist first so a first-ever save on a brand
+    new exhibit behaves identically to an edit of an existing one."""
+    await ensure_audio_rows(exhibit_id)
+    async with get_conn() as db:
+        await db.execute(
+            "UPDATE audio_cache SET script_stale = 1, audio_stale = 1 WHERE exhibit_id = ?",
+            (exhibit_id,),
+        )
+        await db.commit()
+
+
+async def save_draft_scripts(exhibit_id, scripts: dict):
+    """Stage 2 (Generate scripts) result — one row per language. Editing the
+    script always invalidates whatever draft audio existed for it, since
+    that audio was narrating the *old* script text."""
+    async with get_conn() as db:
+        await db.executemany(
+            """INSERT INTO audio_cache (exhibit_id, language_code, draft_title_translated,
+                                         draft_script_text, script_stale, audio_stale)
+               VALUES (?, ?, ?, ?, 0, 1)
+               ON CONFLICT(exhibit_id, language_code) DO UPDATE SET
+                   draft_title_translated = excluded.draft_title_translated,
+                   draft_script_text = excluded.draft_script_text,
+                   script_stale = 0, audio_stale = 1""",
+            [(exhibit_id, code, entry["title"], entry["narration"]) for code, entry in scripts.items()],
+        )
+        await db.commit()
+
+
+async def save_draft_script_manual(exhibit_id, language_code, title_translated, script_text):
+    """A staff member hand-edited one language's script directly — treated
+    as the new authoritative text for that language (script_stale clears),
+    but its existing draft audio no longer matches (audio_stale sets)."""
+    async with get_conn() as db:
+        await db.execute(
+            """UPDATE audio_cache
+               SET draft_title_translated = ?, draft_script_text = ?,
+                   script_stale = 0, audio_stale = 1
+               WHERE exhibit_id = ? AND language_code = ?""",
+            (title_translated, script_text, exhibit_id, language_code),
+        )
+        await db.commit()
+
+
+async def upsert_audio_draft(exhibit_id, language_code, **fields):
+    """Like upsert_audio_cache, but writes the draft_* shadow columns the web
+    admin's Stage 3 (Generate audio) uses — never the published columns
+    bot/visitor.py reads. `fields` keys are the bare names (e.g. "status"),
+    this prefixes them to draft_* automatically."""
+    fields = {f"draft_{k}": v for k, v in fields.items()}
+    columns = ["exhibit_id", "language_code", *fields.keys()]
+    placeholders = ", ".join("?" for _ in columns)
+    updates = ", ".join(f"{k} = excluded.{k}" for k in fields.keys())
+    values = [exhibit_id, language_code, *fields.values()]
+    async with get_conn() as db:
+        await db.execute(
+            f"""INSERT INTO audio_cache ({", ".join(columns)}) VALUES ({placeholders})
+                ON CONFLICT(exhibit_id, language_code) DO UPDATE SET {updates}""",
+            values,
+        )
+        await db.commit()
+
+
+async def clear_audio_stale(exhibit_id, language_code):
+    """A draft audio regeneration for this language just succeeded — it now
+    matches the current draft script."""
+    async with get_conn() as db:
+        await db.execute(
+            "UPDATE audio_cache SET audio_stale = 0 WHERE exhibit_id = ? AND language_code = ?",
+            (exhibit_id, language_code),
+        )
+        await db.commit()
+
+
+async def promote_draft_to_live(exhibit_id):
+    """Publish: copies every language's draft_* columns onto the published
+    columns in one statement — the only thing that can change what
+    bot/visitor.py serves. Until this runs, regenerating drafts never
+    touches what's currently live."""
+    async with get_conn() as db:
+        await db.execute(
+            """UPDATE audio_cache SET
+                   script_text = draft_script_text,
+                   title_translated = draft_title_translated,
+                   tts_provider = draft_tts_provider,
+                   voice_id = draft_voice_id,
+                   telegram_file_id = draft_telegram_file_id,
+                   telegram_file_unique_id = draft_telegram_file_unique_id,
+                   duration_seconds = draft_duration_seconds,
+                   status = draft_status,
+                   error_message = draft_error_message,
+                   generated_at = CURRENT_TIMESTAMP
+               WHERE exhibit_id = ?""",
+            (exhibit_id,),
+        )
+        await db.commit()
 
 
 async def get_all_audio_rows(exhibit_id):
