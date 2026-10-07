@@ -33,7 +33,12 @@ async def main():
 
     webapp_port = int(os.environ.get("WEBAPP_PORT", "8097"))
     web_server = uvicorn.Server(
-        uvicorn.Config(create_app(bot), host="0.0.0.0", port=webapp_port, log_level="info")
+        uvicorn.Config(
+            create_app(bot), host="0.0.0.0", port=webapp_port, log_level="info",
+            # Trust Traefik's X-Forwarded-Proto/Host — the webapp is only reachable
+            # through Traefik (never directly exposed), so this is safe.
+            proxy_headers=True, forwarded_allow_ips="*",
+        )
     )
 
     try:
