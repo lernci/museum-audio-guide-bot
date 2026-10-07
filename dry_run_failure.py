@@ -29,7 +29,7 @@ async def main():
     async with db.get_conn() as conn:
         await conn.execute(
             "INSERT OR IGNORE INTO staff_users (telegram_user_id, full_name, role) VALUES (?, ?, ?)",
-            (999, "Dry Run Curator", "admin"),
+            (999, "Dry Run Curator", "owner"),
         )
         await conn.commit()
 
@@ -37,9 +37,9 @@ async def main():
         exhibit_id="DRY02",
         title_am="Երկրորդ փորձնական ցուցանմուշ",
         fact_sheet_am="Ստեղծվել է 1920 թվականին։",
-        photo_file_id="FAKE_PHOTO_FILE_ID_2",
         created_by=999,
     )
+    await db.replace_exhibit_photos("DRY02", ["FAKE_PHOTO_FILE_ID_2"])
 
     with mock.patch.object(pipeline, "_generate_scripts", fake_generate_scripts), \
          mock.patch.object(pipeline, "_synthesize_local_am", lambda text, dst: fake_synthesize(text, dst, "am")), \

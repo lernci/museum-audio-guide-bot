@@ -1,5 +1,5 @@
 """
-Background async worker: runs the Claude-translate + TTS + ffmpeg + cache
+Background async worker: runs the OpenAI-translate + TTS + ffmpeg + cache
 pipeline for a newly confirmed exhibit, without blocking the Admin FSM.
 
 ── Why in-process asyncio instead of Celery ────────────────────────────────
@@ -19,12 +19,15 @@ swapped for Celery/RQ later without changing `process_exhibit` itself — only
 how it gets *invoked* changes.
 """
 import asyncio
+import json
 from pathlib import Path
 
-import anthropic
+import openai
+from aiogram.types import FSInputFile
 
 from db import db
 from utils.audio import to_telegram_voice, probe_duration_seconds
+from utils.hayq_tts import synthesize_apittshy
 from utils.qr import build_deep_link, generate_qr_png
 from worker.prompts import SYSTEM_PROMPT, build_user_message, SUBMIT_SCRIPTS_TOOL
 
@@ -39,10 +42,23 @@ TTS_ROUTING = {
     "de": "openai", "fa": "openai", "zh": "openai", "it": "openai", "el": "openai",
 }
 
+OPENAI_TTS_MODEL = "tts-1"
+OPENAI_TTS_VOICE = "alloy"  # one voice for all 9 languages — OpenAI TTS reads the input text's own language
+OPENAI_SCRIPTS_MODEL = "gpt-5.5"  # docent-script generation (all 10 languages, one call per exhibit)
+
 MAX_CONCURRENT_TTS = 3  # respects provider rate limits while still parallelizing
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
-_claude = anthropic.AsyncAnthropic()  # picks up ANTHROPIC_API_KEY from env
+
+_openai_client = None  # lazily constructed — openai.AsyncOpenAI() raises immediately if
+                        # OPENAI_API_KEY isn't set, which would crash the whole bot at import time.
+
+
+def _get_openai_client() -> openai.AsyncOpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = openai.AsyncOpenAI()
+    return _openai_client
 
 
 async def enqueue_exhibit(exhibit_id: str) -> None:
@@ -67,7 +83,10 @@ async def worker_loop(bot) -> None:
         try:
             await process_exhibit(bot, exhibit_id)
         except Exception as exc:  # noqa: BLE001 — never let one bad exhibit kill the loop
-            await notify_admins(bot, f"Exhibit {exhibit_id} pipeline crashed: {exc}")
+            try:
+                await notify_owners(bot, f"Exhibit {exhibit_id} pipeline crashed: {exc}")
+            except Exception:  # noqa: BLE001 — a bad staff row must not kill the loop either
+                pass
         finally:
             _queue.task_done()
 
@@ -82,64 +101,81 @@ async def process_exhibit(bot, exhibit_id: str) -> None:
     qr_path = QR_DIR / f"{exhibit_id}.png"
     generate_qr_png(deep_link, qr_path)
     await db.set_exhibit_qr(exhibit_id, str(qr_path), deep_link)
-    await bot.send_photo(
-        exhibit["created_by"],
-        photo=open(qr_path, "rb"),
-        caption=f"QR code for exhibit {exhibit_id} — print and place next to the object.",
-    )
+    if exhibit["created_by"] is not None:
+        # Exhibits added via the web admin panel have no Telegram creator to DM —
+        # they can see/download the QR from the exhibit's page instead.
+        await bot.send_photo(
+            exhibit["created_by"],
+            photo=FSInputFile(qr_path),
+            caption=f"QR code for exhibit {exhibit_id} — print and place next to the object.",
+        )
     await db.mark_jobs_by_type(exhibit_id, "qr", status="success")
 
-    # 2) One Claude call -> narration script for all 10 languages at once.
+    # 2) One Claude call -> localized title + narration script for all 10 languages.
     try:
         scripts = await _generate_scripts(exhibit_id, exhibit["title_am"], exhibit["fact_sheet_am"])
     except Exception as exc:
         await db.mark_jobs_by_type(exhibit_id, "translate", status="failed", error_message=str(exc))
         await db.set_exhibit_status(exhibit_id, "failed")
-        await notify_admins(bot, f"Exhibit {exhibit_id}: translation step failed — {exc}")
+        await notify_owners(bot, f"Exhibit {exhibit_id}: translation step failed — {exc}")
         return
     await db.mark_jobs_by_type(exhibit_id, "translate", status="success")
 
     # 3) Fan out TTS + ffmpeg + upload per language, bounded concurrency.
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_TTS)
 
-    async def bound_tts(lang: str, text: str):
+    async def bound_tts(lang: str, entry: dict):
         async with semaphore:
-            return await _tts_and_cache(bot, exhibit_id, lang, text)
+            return await _tts_and_cache(bot, exhibit_id, lang, entry["title"], entry["narration"])
 
     results = await asyncio.gather(
-        *(bound_tts(lang, text) for lang, text in scripts.items()),
+        *(bound_tts(lang, entry) for lang, entry in scripts.items()),
         return_exceptions=True,
     )
 
     failures = [lang for lang, r in zip(scripts, results) if isinstance(r, Exception)]
     if failures:
         await db.set_exhibit_status(exhibit_id, "failed")
-        await notify_admins(
+        await notify_owners(
             bot,
-            f"Exhibit {exhibit_id}: {len(failures)} language(s) failed "
+            f"Exhibit {exhibit_id} ({exhibit['title_am']}): {len(failures)} language(s) failed "
             f"({', '.join(failures)}). Retry with /retry {exhibit_id} <lang>.",
         )
     else:
-        await db.set_exhibit_status(exhibit_id, "ready")
-        await notify_admins(bot, f"Exhibit {exhibit_id} is live — QR code is ready to print.")
+        await db.set_exhibit_status(exhibit_id, "review")
+        summary = "\n".join(f"{lang}: ok" for lang in scripts)
+        await notify_owners(
+            bot,
+            f"Exhibit {exhibit_id} ({exhibit['title_am']}) is ready for review.\n\n"
+            f"{summary}\n\nUse /review {exhibit_id} to proofread, then /publish {exhibit_id} to go live.",
+        )
 
 
 async def _generate_scripts(exhibit_id: str, title_am: str, fact_sheet_am: str) -> dict:
-    response = await _claude.messages.create(
-        model="claude-sonnet-5",
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        tools=[SUBMIT_SCRIPTS_TOOL],
-        tool_choice={"type": "tool", "name": "submit_docent_scripts"},
-        messages=[{"role": "user", "content": build_user_message(exhibit_id, title_am, fact_sheet_am)}],
+    client = _get_openai_client()
+    response = await client.chat.completions.create(
+        model=OPENAI_SCRIPTS_MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": build_user_message(exhibit_id, title_am, fact_sheet_am)},
+        ],
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": SUBMIT_SCRIPTS_TOOL["name"],
+                "description": SUBMIT_SCRIPTS_TOOL["description"],
+                "parameters": SUBMIT_SCRIPTS_TOOL["input_schema"],
+            },
+        }],
+        tool_choice={"type": "function", "function": {"name": "submit_docent_scripts"}},
     )
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "submit_docent_scripts":
-            return block.input["scripts"]
-    raise RuntimeError("Claude response missing submit_docent_scripts tool call")
+    tool_calls = response.choices[0].message.tool_calls
+    if not tool_calls:
+        raise RuntimeError("OpenAI response missing submit_docent_scripts tool call")
+    return json.loads(tool_calls[0].function.arguments)["scripts"]
 
 
-async def _tts_and_cache(bot, exhibit_id: str, lang: str, script_text: str) -> None:
+async def _tts_and_cache(bot, exhibit_id: str, lang: str, title_translated: str, script_text: str) -> None:
     provider = TTS_ROUTING[lang]
     raw_path = TMP_DIR / f"{exhibit_id}_{lang}_raw"
     ogg_path = TMP_DIR / f"{exhibit_id}_{lang}.ogg"
@@ -155,10 +191,11 @@ async def _tts_and_cache(bot, exhibit_id: str, lang: str, script_text: str) -> N
         await to_telegram_voice(raw_path, ogg_path)
         duration = await probe_duration_seconds(ogg_path)
 
-        sent = await bot.send_voice(LOG_CHANNEL_ID, voice=open(ogg_path, "rb"))
+        sent = await bot.send_voice(LOG_CHANNEL_ID, voice=FSInputFile(ogg_path))
         await db.upsert_audio_cache(
             exhibit_id, lang,
             script_text=script_text,
+            title_translated=title_translated,
             tts_provider=provider,
             voice_id=voice_id,
             telegram_file_id=sent.voice.file_id,
@@ -169,11 +206,12 @@ async def _tts_and_cache(bot, exhibit_id: str, lang: str, script_text: str) -> N
         )
         await db.mark_jobs_by_type(exhibit_id, "tts", status="success", language_code=lang)
     except Exception as exc:
-        # keep script_text on failure too — it's the expensive-to-regenerate part
-        # (a Claude call), TTS is what actually failed, so /retry can skip straight to TTS.
+        # keep script_text/title on failure too — they're the expensive-to-regenerate
+        # part (a Claude call), TTS is what actually failed, so /retry can skip
+        # straight to TTS.
         await db.upsert_audio_cache(
-            exhibit_id, lang, script_text=script_text, tts_provider=provider,
-            status="failed", error_message=str(exc),
+            exhibit_id, lang, script_text=script_text, title_translated=title_translated,
+            tts_provider=provider, status="failed", error_message=str(exc),
         )
         await db.mark_jobs_by_type(exhibit_id, "tts", status="failed", language_code=lang, error_message=str(exc))
         raise
@@ -183,28 +221,47 @@ async def _tts_and_cache(bot, exhibit_id: str, lang: str, script_text: str) -> N
 
 
 async def retry_language(bot, exhibit_id: str, lang: str) -> None:
-    """Handler for the admin `/retry <exhibit_id> <lang>` command. Reuses the
-    already-generated script (no Claude call) and retries just the TTS step."""
+    """Handler for the owner `/retry <exhibit_id> <lang>` command — works from
+    both 'failed' and 'review' states. Reuses the already-generated title +
+    script (no Claude call) and retries just the TTS step. Returns the exhibit
+    to 'review' once no language is left failing."""
     cached = await db.get_audio_row(exhibit_id, lang)
     if cached is None or not cached["script_text"]:
         raise RuntimeError(f"No stored script for {exhibit_id}/{lang} — retry full exhibit instead")
 
-    await _tts_and_cache(bot, exhibit_id, lang, cached["script_text"])
+    await _tts_and_cache(bot, exhibit_id, lang, cached["title_translated"], cached["script_text"])
 
-    if await db.all_languages_ready(exhibit_id, expected_count=len(TTS_ROUTING)):
-        await db.set_exhibit_status(exhibit_id, "ready")
-        await notify_admins(bot, f"Exhibit {exhibit_id} is now fully ready after retrying {lang}.")
+    still_failed = await db.get_failed_languages(exhibit_id)
+    if not still_failed:
+        await db.set_exhibit_status(exhibit_id, "review")
+        await notify_owners(bot, f"Exhibit {exhibit_id} is back in review after retrying {lang}.")
+    else:
+        await notify_owners(
+            bot,
+            f"Exhibit {exhibit_id}: {lang} retried successfully, still failing: {', '.join(still_failed)}.",
+        )
 
 
 # ── TTS provider adapters — fill in real SDK calls once vendor is picked ───
+ARMENIAN_TTS_VOICE = "biverman"  # starting default from the hayq.ican24.net apittshy voices — swap here if the client picks differently
+
+
 async def _synthesize_local_am(text: str, dst_path: Path) -> tuple[Path, str]:
-    """TODO: call the museum's proprietary Armenian TTS algorithm/binary."""
-    raise NotImplementedError
+    # synthesize_apittshy is a blocking `requests` call — run off the event loop
+    await asyncio.to_thread(synthesize_apittshy, text, ARMENIAN_TTS_VOICE, dst_path)
+    return dst_path, ARMENIAN_TTS_VOICE
 
 
 async def _synthesize_openai(text: str, lang: str, dst_path: Path) -> tuple[Path, str]:
-    """TODO: openai.audio.speech.create(model='tts-1', voice=..., input=text)."""
-    raise NotImplementedError
+    client = _get_openai_client()
+    response = await client.audio.speech.create(
+        model=OPENAI_TTS_MODEL,
+        voice=OPENAI_TTS_VOICE,
+        input=text,
+        response_format="mp3",
+    )
+    await response.astream_to_file(dst_path)
+    return dst_path, OPENAI_TTS_VOICE
 
 
 async def _synthesize_elevenlabs(text: str, lang: str, dst_path: Path) -> tuple[Path, str]:
@@ -212,9 +269,12 @@ async def _synthesize_elevenlabs(text: str, lang: str, dst_path: Path) -> tuple[
     raise NotImplementedError
 
 
-async def notify_admins(bot, message: str) -> None:
-    async with db.get_conn() as conn:
-        cur = await conn.execute("SELECT telegram_user_id FROM staff_users")
-        rows = await cur.fetchall()
+async def notify_owners(bot, message: str) -> None:
+    """Pipeline results and /retry outcomes only go to owners — they're the
+    ones who can act on them via /review, /publish, and /retry."""
+    rows = await db.get_staff_by_role("owner")
     for row in rows:
-        await bot.send_message(row["telegram_user_id"], message)
+        try:
+            await bot.send_message(row["telegram_user_id"], message)
+        except Exception:  # noqa: BLE001 — one unreachable owner must not block the rest
+            pass

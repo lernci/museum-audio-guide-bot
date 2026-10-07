@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Museum Audio Guide Admin{% endblock %}</title>
+  <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="{{ request.url_for('dashboard') }}">Goris Museum — Exhibits</a>
+    {% if request.session.get('webapp_user') %}
+    <form method="post" action="{{ request.url_for('logout') }}" class="logout-form">
+      <button type="submit" class="link-btn">Log out</button>
+    </form>
+    {% endif %}
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

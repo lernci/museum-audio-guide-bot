@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Exhibit {{ exhibit['id'] }} — Museum Audio Guide Admin{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Exhibit {{ exhibit['id'] }} <span class="badge badge-{{ exhibit['status'] }}">{{ exhibit['status'] }}</span></h1>
+  <div class="actions">
+    {% if exhibit['status'] in ('review', 'unpublished') %}
+    <form method="post" action="{{ request.url_for('exhibit_publish', exhibit_id=exhibit['id']) }}">
+      <button type="submit" class="btn btn-publish">Publish</button>
+    </form>
+    {% endif %}
+    {% if exhibit['status'] == 'live' %}
+    <form method="post" action="{{ request.url_for('exhibit_unpublish', exhibit_id=exhibit['id']) }}">
+      <button type="submit" class="btn btn-unpublish">Unpublish</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+{% if exhibit['deep_link'] %}
+<div class="qr-block">
+  <img class="qr-img" src="{{ request.url_for('media_qr', exhibit_id=exhibit['id']) }}" alt="QR code">
+  <p class="deep-link">Live link: <a href="{{ exhibit['deep_link'] }}" target="_blank">{{ exhibit['deep_link'] }}</a></p>
+</div>
+{% endif %}
+
+<section class="photos">
+  {% for p in photos %}
+  <img src="{{ request.url_for('media_photo', exhibit_id=exhibit['id'], index=loop.index0) }}" alt="Exhibit photo">
+  {% endfor %}
+</section>
+
+<section class="languages">
+  <h2>Languages</h2>
+  <div class="lang-grid">
+    {% for code, label in LANGUAGE_LABELS.items() %}
+    {% set row = audio_rows.get(code) %}
+    <div class="lang-card lang-{{ row['status'] if row else 'pending' }}">
+      <h3>{{ label }}</h3>
+      {% if row %}
+        <p class="lang-status">{{ row['status'] }}</p>
+        {% if row['title_translated'] %}<p class="lang-title">{{ row['title_translated'] }}</p>{% endif %}
+        {% if row['status'] == 'ready' %}
+          <audio controls src="{{ request.url_for('media_audio', exhibit_id=exhibit['id'], lang=code) }}"></audio>
+        {% endif %}
+        {% if row['script_text'] %}<details><summary>Script</summary><p>{{ row['script_text'] }}</p></details>{% endif %}
+        {% if row['status'] == 'failed' %}
+          <form method="post" action="{{ request.url_for('exhibit_retry', exhibit_id=exhibit['id'], lang=code) }}">
+            <button type="submit" class="link-btn">Retry</button>
+          </form>
+          {% if row['error_message'] %}<p class="error small">{{ row['error_message'] }}</p>{% endif %}
+        {% endif %}
+      {% else %}
+        <p class="lang-status">not generated yet</p>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="edit">
+  <h2>Edit</h2>
+  <p class="hint">Saving changes resets this exhibit to draft and regenerates every language.</p>
+  <form method="post" action="{{ request.url_for('exhibit_edit', exhibit_id=exhibit['id']) }}" enctype="multipart/form-data" class="exhibit-form">
+    <label>Title (Armenian)
+      <input type="text" name="title_am" value="{{ exhibit['title_am'] }}">
+    </label>
+    <label>Replace photos (leave empty to keep current)
+      <input type="file" name="photos" accept="image/*" multiple>
+    </label>
+    <label>Fact sheet (Armenian)
+      <textarea name="fact_sheet_text" rows="8">{{ exhibit['fact_sheet_am'] }}</textarea>
+    </label>
+    <label>…or attach a replacement .txt / .docx file
+      <input type="file" name="fact_sheet_file" accept=".txt,.docx">
+    </label>
+    <button type="submit" class="btn">Save &amp; regenerate</button>
+  </form>
+</section>
+{% endblock %}

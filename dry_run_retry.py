@@ -21,14 +21,15 @@ async def main():
     async with db.get_conn() as conn:
         await conn.execute(
             "INSERT OR IGNORE INTO staff_users (telegram_user_id, full_name, role) VALUES (?, ?, ?)",
-            (999, "Dry Run Curator", "admin"),
+            (999, "Dry Run Curator", "owner"),
         )
         await conn.commit()
 
     await db.create_exhibit(
         exhibit_id="DRY03", title_am="Երրորդ ցուցանմուշ", fact_sheet_am="Փաստեր 1930 թվականից։",
-        photo_file_id="FAKE_PHOTO_FILE_ID_3", created_by=999,
+        created_by=999,
     )
+    await db.replace_exhibit_photos("DRY03", ["FAKE_PHOTO_FILE_ID_3"])
 
     call_count = {"n": 0}
 
@@ -58,11 +59,11 @@ async def main():
         await pipeline.retry_language(bot, "DRY03", "de")
 
     exhibit = await db.get_exhibit("DRY03")
-    print("status after retry (expect 'ready'):", exhibit["status"])
+    print("status after retry (expect 'review'):", exhibit["status"])
     cached = await db.get_cached_voice("DRY03", "de")
     print("de cache after retry:", dict(cached) if cached else None)
 
-    assert exhibit["status"] == "ready"
+    assert exhibit["status"] == "review"
     assert cached is not None and cached["status"] == "ready"
     print("\nRETRY DRY RUN PASSED")
 

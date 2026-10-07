@@ -53,8 +53,13 @@ async def fake_synthesize(text: str, dst_path: Path, tag: str):
 
 async def fake_generate_scripts(exhibit_id, title_am, fact_sheet_am):
     from worker.prompts import LANGUAGES
-    return {code: f"[{name} mock narration for {title_am}] {fact_sheet_am[:40]}"
-            for code, name in LANGUAGES.items()}
+    return {
+        code: {
+            "title": f"[{name}] {title_am}",
+            "narration": f"[{name} mock narration for {title_am}] {fact_sheet_am[:40]}",
+        }
+        for code, name in LANGUAGES.items()
+    }
 
 
 # ── Dry run ──────────────────────────────────────────────────────────────
@@ -66,11 +71,11 @@ async def main():
 
     bot = FakeBot()
 
-    # seed a staff user (FK target for created_by, and notify_admins recipient)
+    # seed a staff user (FK target for created_by, and notify_owners recipient)
     async with db.get_conn() as conn:
         await conn.execute(
             "INSERT OR IGNORE INTO staff_users (telegram_user_id, full_name, role) VALUES (?, ?, ?)",
-            (999, "Dry Run Curator", "admin"),
+            (999, "Dry Run Curator", "owner"),
         )
         await conn.commit()
 
@@ -78,9 +83,9 @@ async def main():
         exhibit_id="DRY01",
         title_am="Փորձնական ցուցանմուշ",
         fact_sheet_am="Այս իրը պատրաստվել է 1890 թվականին, նվիրաբերվել է թանգարանին 1975 թ.",
-        photo_file_id="FAKE_PHOTO_FILE_ID",
         created_by=999,
     )
+    await db.replace_exhibit_photos("DRY01", ["FAKE_PHOTO_FILE_ID"])
 
     with mock.patch.object(pipeline, "_generate_scripts", fake_generate_scripts), \
          mock.patch.object(pipeline, "_synthesize_local_am", lambda text, dst: fake_synthesize(text, dst, "am")), \
@@ -124,7 +129,7 @@ async def main():
     cached = await db.get_cached_voice("DRY01", "en")
     print("\nvisitor-side lookup for 'en':", dict(cached) if cached else None)
 
-    assert exhibit["status"] == "ready", "expected exhibit status to be ready"
+    assert exhibit["status"] == "review", "expected exhibit status to be review"
     assert len(rows) == 10, f"expected 10 cached languages, got {len(rows)}"
     assert all(r["status"] == "ready" for r in rows), "not all languages cached as ready"
     assert len(jobs) == 12, f"expected 12 job rows, got {len(jobs)}"

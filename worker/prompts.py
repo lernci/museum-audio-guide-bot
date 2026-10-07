@@ -1,9 +1,11 @@
-"""Claude prompt + structured-output schema for the docent-script pipeline.
+"""Prompt + structured-output schema for the docent-script pipeline.
 
-One Claude call per exhibit produces narration scripts for all 10 languages
+One OpenAI call per exhibit produces narration scripts for all 10 languages
 at once (Armenian included — the staff's raw fact sheet gets turned into a
 proper narrative too, it just gets routed to the local TTS engine afterward
-instead of OpenAI/ElevenLabs).
+instead of OpenAI/ElevenLabs). The schema below is provider-agnostic JSON
+Schema; worker/pipeline.py wraps it in whichever shape the active provider's
+tool-calling API expects.
 """
 
 LANGUAGES = {
@@ -29,7 +31,8 @@ next to the physical exhibit.
 INPUT you receive: an exhibit title and a raw fact sheet, both in Armenian, \
 written by museum staff as informal notes or bullet points.
 
-OUTPUT you produce: one narration script per requested target language.
+OUTPUT you produce: for each requested target language, a localized exhibit \
+title and a narration script.
 
 Hard rules:
 
@@ -67,7 +70,12 @@ unless there is no standard equivalent.
 6. Produce EVERY requested language, including Armenian itself — turn the \
 staff's raw notes into the same polished narrative style, in Armenian.
 
-7. Output nothing except the narration text for each language via the \
+7. TITLE: alongside the narration, give a short localized exhibit title for \
+each language — the same title the staff gave, adapted the way rule 5 \
+describes (transliterated proper nouns, natural phrasing), not a summary or \
+a translation of the narration script.
+
+8. Output nothing except the title and narration for each language via the \
 provided tool call. No preamble, no notes to the developer, no explanations.
 """
 
@@ -99,16 +107,24 @@ def build_user_message(exhibit_id: str, title_am: str, fact_sheet_am: str) -> st
 SUBMIT_SCRIPTS_TOOL = {
     "name": "submit_docent_scripts",
     "description": (
-        "Submit the finished narration script for every requested language."
+        "Submit the finished localized title and narration script for every requested language."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "scripts": {
                 "type": "object",
-                "description": "Map of language code -> narration script text.",
+                "description": "Map of language code -> {title, narration}.",
                 "properties": {
-                    code: {"type": "string", "description": f"{name} narration script"}
+                    code: {
+                        "type": "object",
+                        "description": f"{name} title + narration script",
+                        "properties": {
+                            "title": {"type": "string", "description": f"{name} localized exhibit title"},
+                            "narration": {"type": "string", "description": f"{name} narration script"},
+                        },
+                        "required": ["title", "narration"],
+                    }
                     for code, name in LANGUAGES.items()
                 },
                 "required": list(LANGUAGES.keys()),
@@ -117,24 +133,3 @@ SUBMIT_SCRIPTS_TOOL = {
         "required": ["scripts"],
     },
 }
-
-
-def call_claude_for_scripts(client, exhibit_id: str, title_am: str, fact_sheet_am: str) -> dict:
-    """Returns {"am": "...", "en": "...", ...}. `client` is an anthropic.Anthropic instance."""
-    response = client.messages.create(
-        model="claude-sonnet-5",
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        tools=[SUBMIT_SCRIPTS_TOOL],
-        tool_choice={"type": "tool", "name": "submit_docent_scripts"},
-        messages=[
-            {
-                "role": "user",
-                "content": build_user_message(exhibit_id, title_am, fact_sheet_am),
-            }
-        ],
-    )
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "submit_docent_scripts":
-            return block.input["scripts"]
-    raise RuntimeError("Claude did not return the expected tool call")

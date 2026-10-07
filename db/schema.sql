@@ -9,8 +9,8 @@
 CREATE TABLE staff_users (
     telegram_user_id   BIGINT PRIMARY KEY,
     full_name           TEXT NOT NULL,
-    role                 TEXT NOT NULL DEFAULT 'editor'
-                          CHECK (role IN ('admin', 'editor')),
+    role                 TEXT NOT NULL DEFAULT 'content'
+                          CHECK (role IN ('content', 'owner')),
     added_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -21,15 +21,29 @@ CREATE TABLE exhibits (
     id                   TEXT PRIMARY KEY,        -- human exhibit number, e.g. "007"
     title_am             TEXT NOT NULL,            -- staff-entered title (Armenian)
     fact_sheet_am        TEXT NOT NULL,            -- staff-entered raw facts (Armenian)
-    photo_file_id        TEXT,                     -- Telegram file_id of exhibit photo
     qr_code_path         TEXT,                     -- filesystem path to generated QR PNG
     deep_link            TEXT,                     -- t.me/<bot>?start=exh_<id>
     status               TEXT NOT NULL DEFAULT 'draft'
-                          CHECK (status IN ('draft', 'processing', 'ready', 'failed')),
+                          CHECK (status IN ('draft', 'processing', 'review', 'live', 'unpublished', 'failed')),
     created_by           BIGINT REFERENCES staff_users(telegram_user_id),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- exhibit_photos: 1-3 photos per exhibit, ordered. We store the Telegram
+-- file_id only — Telegram hosts the actual image, so we can re-send it for
+-- free by id instead of keeping files on our own disk.
+-- ─────────────────────────────────────────────────────────────────────────
+CREATE TABLE exhibit_photos (
+    id                   SERIAL PRIMARY KEY,
+    exhibit_id           TEXT NOT NULL REFERENCES exhibits(id) ON DELETE CASCADE,
+    telegram_file_id     TEXT NOT NULL,
+    sort_order           INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (exhibit_id, sort_order)
+);
+
+CREATE INDEX idx_exhibit_photos_exhibit ON exhibit_photos(exhibit_id);
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- audio_cache: one row per (exhibit, language) — the pre-generated asset
@@ -42,6 +56,7 @@ CREATE TABLE audio_cache (
                           CHECK (language_code IN
                             ('am','en','ru','fr','es','de','fa','zh','it','el')),
     script_text          TEXT,                     -- narration script actually spoken
+    title_translated     TEXT,                     -- exhibit title localized to this language
     tts_provider         TEXT
                           CHECK (tts_provider IN ('local_am', 'openai', 'elevenlabs')),
     voice_id             TEXT,                     -- provider-specific voice/model id

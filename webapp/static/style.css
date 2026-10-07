@@ -1,0 +1,178 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --border: #2a2e37;
+  --text: #e7e9ee;
+  --muted: #9aa1ad;
+  --accent: #4f8cff;
+  --ok: #38b06a;
+  --warn: #e0a33a;
+  --danger: #e05a4f;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.brand { color: var(--text); font-weight: 600; text-decoration: none; }
+
+.container {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+}
+
+h1 { font-size: 1.4rem; margin: 0 0 4px; }
+h2 { font-size: 1.1rem; margin: 32px 0 12px; color: var(--text); }
+h3 { font-size: 0.95rem; margin: 0 0 6px; }
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.actions { display: flex; gap: 8px; }
+
+a { color: var(--accent); }
+
+.btn {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  padding: 9px 16px;
+  border-radius: 8px;
+  text-decoration: none;
+  border: none;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.btn-publish { background: var(--ok); }
+.btn-unpublish { background: var(--danger); }
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font-size: 0.9rem;
+  text-decoration: underline;
+}
+
+.logout-form { margin: 0; }
+
+.error { color: var(--danger); }
+.error.small { font-size: 0.8rem; }
+.hint { color: var(--muted); font-size: 0.85rem; }
+.empty { color: var(--muted); }
+
+.exhibit-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 16px;
+}
+.exhibit-table th, .exhibit-table td {
+  text-align: left;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.exhibit-table th { color: var(--muted); font-weight: 500; font-size: 0.85rem; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  background: var(--border);
+  color: var(--muted);
+}
+.badge-live { background: rgba(56, 176, 106, 0.18); color: var(--ok); }
+.badge-review { background: rgba(224, 163, 58, 0.18); color: var(--warn); }
+.badge-failed { background: rgba(224, 90, 79, 0.18); color: var(--danger); }
+.badge-unpublished { background: rgba(224, 90, 79, 0.12); color: var(--danger); }
+.badge-processing, .badge-draft { background: rgba(79, 140, 255, 0.15); color: var(--accent); }
+
+.qr-block { display: flex; align-items: center; gap: 14px; margin: 16px 0; }
+.qr-img { width: 110px; height: 110px; background: #fff; border-radius: 8px; padding: 6px; }
+.deep-link { color: var(--muted); font-size: 0.9rem; }
+
+.photos { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0; }
+.photos img { height: 160px; border-radius: 8px; border: 1px solid var(--border); }
+
+.lang-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.lang-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+}
+.lang-card.lang-ready { border-color: rgba(56, 176, 106, 0.4); }
+.lang-card.lang-failed { border-color: rgba(224, 90, 79, 0.5); }
+.lang-status { color: var(--muted); font-size: 0.8rem; margin: 0 0 6px; text-transform: uppercase; }
+.lang-title { font-weight: 500; margin: 0 0 8px; }
+.lang-card audio { width: 100%; margin: 6px 0; }
+.lang-card details { font-size: 0.85rem; color: var(--muted); margin-top: 6px; }
+.lang-card details p { color: var(--text); white-space: pre-wrap; }
+
+.exhibit-form, .login-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 560px;
+}
+.exhibit-form label, .login-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+input, textarea {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: var(--text);
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+textarea { resize: vertical; }
+
+.login-card {
+  max-width: 360px;
+  margin: 10vh auto 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px;
+}
+
+section.edit {
+  margin-top: 36px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}

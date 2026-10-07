@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Exhibits — Museum Audio Guide Admin{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Exhibits</h1>
+  <a class="btn" href="{{ request.url_for('exhibit_new_form') }}">+ New exhibit</a>
+</div>
+
+{% if not exhibits %}
+<p class="empty">No exhibits yet.</p>
+{% else %}
+<table class="exhibit-table">
+  <thead>
+    <tr><th>ID</th><th>Title</th><th>Status</th><th>Updated</th></tr>
+  </thead>
+  <tbody>
+    {% for e in exhibits %}
+    <tr>
+      <td><a href="{{ request.url_for('exhibit_detail', exhibit_id=e['id']) }}">{{ e['id'] }}</a></td>
+      <td>{{ e['title_am'] }}</td>
+      <td><span class="badge badge-{{ e['status'] }}">{{ e['status'] }}</span></td>
+      <td>{{ e['updated_at'] }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

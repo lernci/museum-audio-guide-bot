@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}New exhibit — Museum Audio Guide Admin{% endblock %}
+{% block content %}
+<h1>New exhibit</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post" action="{{ request.url_for('exhibit_new_submit') }}" enctype="multipart/form-data" class="exhibit-form">
+  <label>Exhibit number / ID
+    <input type="text" name="exhibit_id" placeholder="e.g. 007" required>
+  </label>
+  <label>Title (Armenian)
+    <input type="text" name="title_am" required>
+  </label>
+  <label>Photos (1–3)
+    <input type="file" name="photos" accept="image/*" multiple required>
+  </label>
+  <label>Fact sheet (Armenian) — type it here
+    <textarea name="fact_sheet_text" rows="8" placeholder="Dates, facts, history..."></textarea>
+  </label>
+  <label>…or attach a .txt / .docx file instead
+    <input type="file" name="fact_sheet_file" accept=".txt,.docx">
+  </label>
+  <p class="hint">Submitting queues translation + voice generation in all 10 languages. You'll
+    be able to review and listen to each one on the exhibit page before publishing.</p>
+  <button type="submit" class="btn">Create exhibit</button>
+</form>
+{% endblock %}
