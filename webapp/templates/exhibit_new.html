@@ -4,17 +4,20 @@
 <h1>New exhibit</h1>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 <form method="post" action="{{ request.url_for('exhibit_new_submit') }}" enctype="multipart/form-data" class="exhibit-form">
-  <label>Exhibit number / ID
-    <input type="text" name="exhibit_id" placeholder="e.g. 007" required>
+  <label>Exhibit number / ID <span class="hint">(optional — auto-assigned when empty: next free number, e.g. 001, 002…)</span>
+    <input type="text" name="exhibit_id" value="{{ exhibit_id or '' }}" placeholder="Leave empty to auto-assign"
+           pattern="[A-Za-z0-9]+" maxlength="32" autocomplete="off"{% if id_error %} aria-invalid="true"{% endif %}>
+    {% if id_error %}<span class="error field-error">{{ id_error }}</span>{% endif %}
+    <span class="hint">Letters and digits only. Cannot be changed later — it is printed in the QR code.</span>
   </label>
   <label>Title (Armenian)
-    <input type="text" name="title_am" required>
+    <input type="text" name="title_am" value="{{ title_am or '' }}" required>
   </label>
   <label>Photos (1–3)
     <input type="file" name="photos" accept="image/*" multiple required>
   </label>
   <label>Fact sheet (Armenian) — type it here
-    <textarea name="fact_sheet_text" rows="8" placeholder="Dates, facts, history..."></textarea>
+    <textarea name="fact_sheet_text" rows="8" placeholder="Dates, facts, history...">{{ fact_sheet_text or '' }}</textarea>
   </label>
   <label>…or attach a .txt / .docx file instead
     <input type="file" name="fact_sheet_file" accept=".txt,.docx">

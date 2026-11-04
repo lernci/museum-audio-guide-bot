@@ -68,6 +68,24 @@ async def get_exhibit(exhibit_id):
         return await cur.fetchone()
 
 
+async def exhibit_id_taken(exhibit_id):
+    """Case-insensitive, so 'a1' can't be created next to 'A1' (confusing on printed QRs)."""
+    async with get_conn() as db:
+        cur = await db.execute("SELECT 1 FROM exhibits WHERE id = ? COLLATE NOCASE", (exhibit_id,))
+        return await cur.fetchone() is not None
+
+
+async def next_sequential_exhibit_id(width=3):
+    """Highest all-digit ID + 1, zero-padded (001, 002, ...). Uses max+1 rather than
+    filling gaps so a number is never reused. Non-numeric IDs are ignored."""
+    async with get_conn() as db:
+        cur = await db.execute(
+            "SELECT MAX(CAST(id AS INTEGER)) FROM exhibits WHERE id NOT GLOB '*[^0-9]*'"
+        )
+        row = await cur.fetchone()
+    return str((row[0] or 0) + 1).zfill(width)
+
+
 async def list_exhibits():
     async with get_conn() as db:
         cur = await db.execute("SELECT * FROM exhibits ORDER BY updated_at DESC")

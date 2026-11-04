@@ -11,6 +11,8 @@ already-live exhibit keep serving its old content untouched while staff
 edit and regenerate it.
 """
 import os
+import re
+import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
@@ -32,6 +34,8 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 
 MAX_PHOTOS = 3
+EXHIBIT_ID_RE = re.compile(r"[A-Za-z0-9]+")
+MAX_EXHIBIT_ID_LEN = 32
 
 
 def create_app(bot) -> FastAPI:
@@ -82,12 +86,15 @@ def create_app(bot) -> FastAPI:
     async def exhibit_new_form(request: Request):
         if (redirect := require_login(request)) is not None:
             return redirect
-        return templates.TemplateResponse(request, "exhibit_new.html", {"error": None})
+        return templates.TemplateResponse(
+            request, "exhibit_new.html",
+            {"error": None, "id_error": None, "exhibit_id": "", "title_am": "", "fact_sheet_text": ""},
+        )
 
     @app.post("/exhibits/new", name="exhibit_new_submit")
     async def exhibit_new_submit(
         request: Request,
-        exhibit_id: str = Form(...),
+        exhibit_id: str = Form(""),
         title_am: str = Form(...),
         fact_sheet_text: str = Form(""),
         fact_sheet_file: UploadFile | None = None,
@@ -97,25 +104,46 @@ def create_app(bot) -> FastAPI:
             return redirect
 
         exhibit_id = exhibit_id.strip()
-        if await db.get_exhibit(exhibit_id) is not None:
+        form_values = {"exhibit_id": exhibit_id, "title_am": title_am, "fact_sheet_text": fact_sheet_text}
+
+        def render_error(status_code=400, **ctx):
             return templates.TemplateResponse(
-                request, "exhibit_new.html", {"error": f"Exhibit {exhibit_id} already exists."}, status_code=400
+                request, "exhibit_new.html", {"error": None, "id_error": None, **form_values, **ctx},
+                status_code=status_code,
             )
+
+        # Blank -> auto-assign. Provided -> validate (IDs are baked into printed QR
+        # codes, so they're immutable after creation; there's deliberately no rename).
+        auto_id = not exhibit_id
+        if not auto_id:
+            if len(exhibit_id) > MAX_EXHIBIT_ID_LEN or not EXHIBIT_ID_RE.fullmatch(exhibit_id):
+                return render_error(
+                    id_error="Use letters and digits only (no spaces or symbols), "
+                             f"up to {MAX_EXHIBIT_ID_LEN} characters."
+                )
+            if await db.exhibit_id_taken(exhibit_id):
+                return render_error(id_error=f"ID “{exhibit_id}” is already taken — choose another or leave blank.")
 
         fact_sheet_am = await _resolve_fact_sheet(fact_sheet_text, fact_sheet_file)
         if not fact_sheet_am:
-            return templates.TemplateResponse(
-                request, "exhibit_new.html",
-                {"error": "Provide the fact sheet as text or attach a .txt/.docx file."}, status_code=400,
-            )
+            return render_error(error="Provide the fact sheet as text or attach a .txt/.docx file.")
         photo_files = [p for p in (photos or []) if p.filename]
         if not photo_files:
-            return templates.TemplateResponse(
-                request, "exhibit_new.html", {"error": "At least one photo is required."}, status_code=400
-            )
+            return render_error(error="At least one photo is required.")
 
         file_ids = await _upload_photos(request.app.state.bot, photo_files[:MAX_PHOTOS])
-        await db.create_exhibit(exhibit_id, title_am.strip(), fact_sheet_am, created_by=None)
+        for _attempt in range(5):
+            if auto_id:
+                exhibit_id = await db.next_sequential_exhibit_id()
+            try:
+                await db.create_exhibit(exhibit_id, title_am.strip(), fact_sheet_am, created_by=None)
+                break
+            except sqlite3.IntegrityError:
+                # Lost a race with another submit for the same ID.
+                if not auto_id:
+                    return render_error(id_error=f"ID “{exhibit_id}” is already taken — choose another or leave blank.")
+        else:
+            return render_error(error="Could not allocate an exhibit ID, please try again.")
         await db.replace_exhibit_photos(exhibit_id, file_ids)
         await db.set_deep_link(exhibit_id, build_deep_link(pipeline.BOT_USERNAME, exhibit_id))
         await db.mark_source_edited(exhibit_id)
