@@ -12,7 +12,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.admin import router as admin_router
-from bot.visitor import router as visitor_router
+from bot.visitor import router as visitor_router, setup_bot_menu
 from worker import pipeline
 from webapp.app import create_app
 
@@ -27,6 +27,10 @@ async def main():
 
     pipeline.LOG_CHANNEL_ID = int(os.environ["LOG_CHANNEL_ID"])
     pipeline.BOT_USERNAME = (await bot.get_me()).username
+    try:
+        await setup_bot_menu(bot)          # /start in the Menu button; visitors never need slash commands
+    except Exception:  # noqa: BLE001 — cosmetic, must never stop the bot from starting
+        logging.exception("setMyCommands failed")
 
     await pipeline.recover_unfinished_jobs()
     worker_task = asyncio.create_task(pipeline.worker_loop(bot))

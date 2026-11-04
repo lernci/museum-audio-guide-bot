@@ -14,7 +14,7 @@ import os
 import re
 import sqlite3
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from aiogram.types import BufferedInputFile
 from fastapi import FastAPI, Form, Request, UploadFile
@@ -28,6 +28,7 @@ from db import db
 from utils.fact_sheet import extract_fact_sheet_text
 from utils.qr import build_deep_link, generate_qr_png_bytes
 from worker import pipeline
+from worker import tags as tagmod
 from webapp.auth import is_logged_in, log_in, log_out, require_login, verify_login
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -77,13 +78,11 @@ def create_app(bot) -> FastAPI:
     async def dashboard(request: Request):
         if (redirect := require_login(request)) is not None:
             return redirect
-        category_filter = request.query_params.get("category") or None
-        if category_filter not in (None, "none") and not category_filter.isdigit():
-            category_filter = None
-        exhibits = await db.list_exhibits(category_filter)
+        selected_tags = [t for t in request.query_params.getlist("tag") if t.isdigit()]
+        exhibits = await db.list_exhibits(selected_tags or None)       # match ANY selected tag
         return templates.TemplateResponse(
             request, "dashboard.html",
-            {"exhibits": exhibits, "categories": await db.list_categories(), "category_filter": category_filter},
+            {"exhibits": exhibits, "tags": await db.list_tags(), "selected_tags": selected_tags},
         )
 
     # ── new exhibit (Stage 1 only — Scripts/Audio/Publish happen on the
@@ -95,7 +94,7 @@ def create_app(bot) -> FastAPI:
         return templates.TemplateResponse(
             request, "exhibit_new.html",
             {"error": None, "id_error": None, "exhibit_id": "", "title_am": "", "fact_sheet_text": "",
-             "categories": await db.list_categories(), "selected_category": "", "new_category": ""},
+             "tags": await db.list_tags(), "selected_tags": [], "new_tags": ""},
         )
 
     @app.post("/exhibits/new", name="exhibit_new_submit")
@@ -104,8 +103,8 @@ def create_app(bot) -> FastAPI:
         exhibit_id: str = Form(""),
         title_am: str = Form(...),
         fact_sheet_text: str = Form(""),
-        category: str = Form(""),
-        new_category: str = Form(""),
+        tags: list[str] = Form([]),
+        new_tags: str = Form(""),
         fact_sheet_file: UploadFile | None = None,
         photos: list[UploadFile] = None,
     ):
@@ -114,8 +113,7 @@ def create_app(bot) -> FastAPI:
 
         exhibit_id = exhibit_id.strip()
         form_values = {"exhibit_id": exhibit_id, "title_am": title_am, "fact_sheet_text": fact_sheet_text,
-                       "selected_category": category, "new_category": new_category,
-                       "categories": await db.list_categories()}
+                       "selected_tags": tags, "new_tags": new_tags, "tags": await db.list_tags()}
 
         def render_error(status_code=400, **ctx):
             return templates.TemplateResponse(
@@ -142,19 +140,12 @@ def create_app(bot) -> FastAPI:
         if not photo_files:
             return render_error(error="At least one photo is required.")
 
-        if category == NEW_CATEGORY and not new_category.strip():
-            return render_error(error="Type a name for the new category, or pick an existing one.")
-
         file_ids = await _upload_photos(request.app.state.bot, photo_files[:MAX_PHOTOS])
-        # Created only now that everything else validated, so a rejected form never leaves
-        # an orphan category behind.
-        category_id = await _resolve_category(category, new_category)
         for _attempt in range(5):
             if auto_id:
                 exhibit_id = await db.next_sequential_exhibit_id()
             try:
-                await db.create_exhibit(exhibit_id, title_am.strip(), fact_sheet_am, created_by=None,
-                                        category_id=category_id)
+                await db.create_exhibit(exhibit_id, title_am.strip(), fact_sheet_am, created_by=None)
                 break
             except sqlite3.IntegrityError:
                 # Lost a race with another submit for the same ID.
@@ -165,7 +156,11 @@ def create_app(bot) -> FastAPI:
         await db.replace_exhibit_photos(exhibit_id, file_ids)
         await db.set_deep_link(exhibit_id, build_deep_link(pipeline.BOT_USERNAME, exhibit_id))
         await db.mark_source_edited(exhibit_id)
-        return RedirectResponse(request.url_for("exhibit_detail", exhibit_id=exhibit_id), status_code=303)
+        # Tags are applied only now that everything else validated, so a rejected form never
+        # leaves orphan tags behind.
+        advisory = await _apply_tags(exhibit_id, tags, new_tags)
+        return RedirectResponse(_with_notice(request.url_for("exhibit_detail", exhibit_id=exhibit_id), advisory),
+                                status_code=303)
 
     # ── exhibit detail (the staged pipeline page) ────────────────────────
     @app.get("/exhibits/{exhibit_id}", name="exhibit_detail", response_class=HTMLResponse)
@@ -183,24 +178,108 @@ def create_app(bot) -> FastAPI:
             {
                 "exhibit": exhibit, "photos": photos, "audio_rows": audio_rows,
                 "publish_problems": publish_problems,
-                "categories": await db.list_categories(),
+                "tags": await db.list_tags(), "selected_tags": await db.get_exhibit_tag_ids(exhibit_id),
+                "new_tags": "", "tags_advisory": tagmod.TAGS_ADVISORY if request.query_params.get("notice") == "tags_limit" else None,
                 "generate_error": request.query_params.get("generate_error"),
             },
         )
 
-    # ── Category (metadata only: does not stale scripts/audio, unlike Stage 1) ──
-    @app.post("/exhibits/{exhibit_id}/category", name="exhibit_save_category")
-    async def exhibit_save_category(
-        request: Request, exhibit_id: str, category: str = Form(""), new_category: str = Form(""),
+    # ── Tags on one exhibit (metadata only: does not stale scripts/audio, unlike Stage 1) ──
+    @app.post("/exhibits/{exhibit_id}/tags", name="exhibit_save_tags")
+    async def exhibit_save_tags(
+        request: Request, exhibit_id: str, tags: list[str] = Form([]), new_tags: str = Form(""),
     ):
         if (redirect := require_login(request)) is not None:
             return redirect
         if await db.get_exhibit(exhibit_id) is None:
             return HTMLResponse("Exhibit not found.", status_code=404)
-        if category == NEW_CATEGORY and not new_category.strip():
-            return HTMLResponse("Type a name for the new category.", status_code=400)
-        await db.set_exhibit_category(exhibit_id, await _resolve_category(category, new_category))
-        return RedirectResponse(request.url_for("exhibit_detail", exhibit_id=exhibit_id), status_code=303)
+        advisory = await _apply_tags(exhibit_id, tags, new_tags)
+        return RedirectResponse(_with_notice(request.url_for("exhibit_detail", exhibit_id=exhibit_id), advisory),
+                                status_code=303)
+
+    # ── Tag management ───────────────────────────────────────────────────
+    @app.get("/tags", name="tags_page", response_class=HTMLResponse)
+    async def tags_page(request: Request):
+        if (redirect := require_login(request)) is not None:
+            return redirect
+        qp = request.query_params
+        return templates.TemplateResponse(request, "tags.html", {
+            "tags": await db.list_tags(), "expected_translations": len(db.TRANSLATION_LANGS),
+            "soft_limit": tagmod.tags_soft_limit(),
+            "tags_advisory": tagmod.TAGS_ADVISORY if qp.get("notice") == "tags_limit" else None,
+            "message": qp.get("message"), "error": qp.get("error"),
+        })
+
+    def _tags_back(request, message=None, error=None, advisory=False):
+        q = {}
+        if message: q["message"] = message
+        if error: q["error"] = error
+        if advisory: q["notice"] = "tags_limit"
+        return RedirectResponse(str(request.url_for("tags_page")) + ("?" + urlencode(q) if q else ""), status_code=303)
+
+    @app.post("/tags/new", name="tag_create")
+    async def tag_create(request: Request, name_hy: str = Form("")):
+        if (redirect := require_login(request)) is not None:
+            return redirect
+        if not name_hy.strip():
+            return _tags_back(request, error="Type a tag name.")
+        advisory = await _apply_tags(None, [], name_hy)
+        return _tags_back(request, message="Tag saved.", advisory=advisory)
+
+    @app.post("/tags/translate-missing", name="tags_translate_missing")
+    async def tags_translate_missing(request: Request):
+        if (redirect := require_login(request)) is not None:
+            return redirect
+        results = await tagmod.translate_missing()
+        failed = sum(1 for ok in results.values() if not ok)
+        if not results:
+            return _tags_back(request, message="Nothing to translate — every tag is translated.")
+        if failed:
+            return _tags_back(request, error=f"{len(results) - failed} translated, {failed} failed — try again.")
+        return _tags_back(request, message=f"Translated {len(results)} tag(s).")
+
+    @app.post("/tags/{tag_id}/translate", name="tag_translate")
+    async def tag_translate(request: Request, tag_id: int):
+        if (redirect := require_login(request)) is not None:
+            return redirect
+        if await db.get_tag(tag_id) is None:
+            return _tags_back(request, error="Tag not found.")
+        ok = await tagmod.translate_tag(tag_id)
+        return _tags_back(request, message="Translated." if ok else None,
+                          error=None if ok else "Translation failed — the tag keeps its Armenian name. Try again.")
+
+    @app.post("/tags/{tag_id}/rename", name="tag_rename")
+    async def tag_rename(request: Request, tag_id: int, name_hy: str = Form("")):
+        if (redirect := require_login(request)) is not None:
+            return redirect
+        if await db.get_tag(tag_id) is None:
+            return _tags_back(request, error="Tag not found.")
+        if not name_hy.strip():
+            return _tags_back(request, error="Type a tag name.")
+        try:
+            await db.rename_tag(tag_id, name_hy)
+        except ValueError:
+            return _tags_back(request, error=f"A tag named “{name_hy.strip()}” already exists — use Merge instead.")
+        ok = await tagmod.translate_tag(tag_id)        # old translations were dropped; retranslate
+        return _tags_back(request, message="Renamed." + ("" if ok else " (Translation failed — marked untranslated; retry below.)"))
+
+    @app.post("/tags/{tag_id}/merge", name="tag_merge")
+    async def tag_merge(request: Request, tag_id: int, into: int = Form(0)):
+        if (redirect := require_login(request)) is not None:
+            return redirect
+        if await db.get_tag(tag_id) is None or await db.get_tag(into) is None or into == tag_id:
+            return _tags_back(request, error="Pick a different, existing tag to merge into.")
+        n = await db.merge_tags(tag_id, into)
+        return _tags_back(request, message=f"Merged — {n} exhibit(s) reassigned.")
+
+    @app.post("/tags/{tag_id}/delete", name="tag_delete")
+    async def tag_delete(request: Request, tag_id: int):
+        if (redirect := require_login(request)) is not None:
+            return redirect
+        if await db.get_tag(tag_id) is None:
+            return _tags_back(request, error="Tag not found.")
+        n = await db.delete_tag(tag_id)
+        return _tags_back(request, message=f"Tag deleted ({n} exhibit link(s) removed; exhibits kept).")
 
     # ── Stage 1 — Source ─────────────────────────────────────────────────
     @app.post("/exhibits/{exhibit_id}/source", name="exhibit_save_source")
@@ -395,16 +474,31 @@ def _ranged_response(request: Request, data: bytes, media_type: str) -> Response
     return Response(content=data, media_type=media_type, headers={"Accept-Ranges": "bytes"})
 
 
-NEW_CATEGORY = "__new__"
+def _with_notice(url, advisory: bool) -> str:
+    return str(url) + ("?notice=tags_limit" if advisory else "")
 
 
-async def _resolve_category(category: str, new_category: str):
-    """Form value -> category id: '' = none, '__new__' = create/reuse by name, else an existing id."""
-    if category == NEW_CATEGORY:
-        return await db.get_or_create_category(new_category)
-    if category.isdigit():
-        return int(category)
-    return None
+async def _apply_tags(exhibit_id, selected: list, new_tags_text: str) -> bool:
+    """Sets the exhibit's tags (if exhibit_id) = ticked existing tags + any new names typed
+    (comma/newline separated; matched to existing tags case-insensitively). New tags are
+    translated best-effort (never blocks). Returns True when a tag was created and the total is
+    now above TAGS_SOFT_LIMIT (the caller shows the advisory)."""
+    ids = {int(t) for t in selected if str(t).isdigit()}
+    created, seen = [], set()
+    for raw in re.split(r"[,\n;،]", new_tags_text or ""):
+        name = " ".join(raw.split())
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        tag_id, was_created = await db.get_or_create_tag(name)
+        ids.add(tag_id)
+        if was_created:
+            created.append(tag_id)
+    if exhibit_id is not None:
+        await db.set_exhibit_tags(exhibit_id, ids)
+    if created:
+        await tagmod.translate_tags(created)
+    return bool(created) and await tagmod.over_soft_limit()
 
 
 async def _resolve_fact_sheet(plain_text: str, upload: UploadFile | None) -> str | None:

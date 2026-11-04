@@ -7,16 +7,14 @@
 </div>
 
 <form method="get" class="filter-form" style="margin-bottom:1rem">
-  <label>Category:
-    <select name="category" onchange="this.form.submit()">
-      <option value="">All</option>
-      <option value="none"{% if category_filter == 'none' %} selected{% endif %}>— uncategorised —</option>
-      {% for c in categories %}
-      <option value="{{ c['id'] }}"{% if category_filter == c['id']|string %} selected{% endif %}>{{ c['name_hy'] }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <noscript><button class="btn" type="submit">Filter</button></noscript>
+  <span>Filter by tag <span class="hint">(shows exhibits with ANY ticked tag)</span>:</span>
+  {% for t in tags %}
+  <label class="tag-check"><input type="checkbox" name="tag" value="{{ t['id'] }}"
+    {% if t['id']|string in selected_tags %}checked{% endif %}> {{ t['name_hy'] }}</label>
+  {% endfor %}
+  <button class="btn" type="submit">Filter</button>
+  {% if selected_tags %}<a href="{{ request.url_for('dashboard') }}">clear</a>{% endif %}
+  · <a href="{{ request.url_for('tags_page') }}">Manage tags</a>
 </form>
 
 {% if not exhibits %}
@@ -24,14 +22,14 @@
 {% else %}
 <table class="exhibit-table">
   <thead>
-    <tr><th>ID</th><th>Title</th><th>Category</th><th>Status</th><th>Updated</th></tr>
+    <tr><th>ID</th><th>Title</th><th>Tags</th><th>Status</th><th>Updated</th></tr>
   </thead>
   <tbody>
     {% for e in exhibits %}
     <tr>
       <td><a href="{{ request.url_for('exhibit_detail', exhibit_id=e['id']) }}">{{ e['id'] }}</a></td>
       <td>{{ e['title_am'] }}</td>
-      <td>{{ e['category_name'] or '—' }}</td>
+      <td>{{ e['tag_names'] or '—' }}</td>
       <td><span class="badge badge-{{ e['status'] }}">{{ e['status'] }}</span></td>
       <td>{{ e['updated_at'] }}</td>
     </tr>

@@ -12,6 +12,7 @@
 </div>
 {% endif %}
 
+{% if tags_advisory %}<p class="notice">{{ tags_advisory }}</p>{% endif %}
 {% if generate_error %}<p class="error">Script step failed: {{ generate_error }}</p>{% endif %}
 
 <!-- ── Stage 1 — Source ─────────────────────────────────────────────── -->
@@ -39,11 +40,11 @@
     </label>
     <button type="submit" class="btn">Save</button>
   </form>
-  <form method="post" action="{{ request.url_for('exhibit_save_category', exhibit_id=exhibit['id']) }}" class="exhibit-form">
-    {% set selected_category = exhibit['category_id'] %}{% set new_category = '' %}
-    {% include "_category_field.html" %}
-    <button type="submit" class="btn">Save category</button>
-    <span class="hint">Category is metadata only — saving it does not outdate scripts or audio.</span>
+  <form method="post" action="{{ request.url_for('exhibit_save_tags', exhibit_id=exhibit['id']) }}" class="exhibit-form">
+    {% include "_tags_field.html" %}
+    <button type="submit" class="btn">Save tags</button>
+    <span class="hint">Tags are metadata only — saving them does not outdate scripts or audio.
+      <a href="{{ request.url_for('tags_page') }}">Manage all tags</a></span>
   </form>
 </section>
 

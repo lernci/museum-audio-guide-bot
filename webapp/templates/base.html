@@ -10,6 +10,7 @@
   <header class="topbar">
     <a class="brand" href="{{ request.url_for('dashboard') }}">Goris Museum — Exhibits</a>
     {% if request.session.get('webapp_user') %}
+    <a class="nav-link" href="{{ request.url_for('tags_page') }}">Tags</a>
     <form method="post" action="{{ request.url_for('logout') }}" class="logout-form">
       <button type="submit" class="link-btn">Log out</button>
     </form>

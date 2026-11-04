@@ -1,0 +1,15 @@
+{# expects: tags (rows with id, name_hy), selected_tags (list of ids as int/str), new_tags (text) #}
+<fieldset class="tags-field">
+  <legend>Tags <span class="hint">(optional — flat labels used for visitor browsing; keep them few and general)</span></legend>
+  {% if tags %}
+  <div class="tag-checks">
+    {% for t in tags %}
+    <label class="tag-check"><input type="checkbox" name="tags" value="{{ t['id'] }}"
+      {% if t['id']|string in selected_tags|map('string')|list %}checked{% endif %}> {{ t['name_hy'] }}</label>
+    {% endfor %}
+  </div>
+  {% else %}<p class="hint">No tags yet — add the first one below.</p>{% endif %}
+  <label>➕ Add new… <span class="hint">(Armenian; separate several with commas — an existing name is reused)</span>
+    <input type="text" name="new_tags" value="{{ new_tags or '' }}" placeholder="e.g. Հանքանյութեր, Գործիքներ" autocomplete="off">
+  </label>
+</fieldset>

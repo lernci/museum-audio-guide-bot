@@ -22,12 +22,12 @@ async def get_conn():
 
 
 # ── exhibits ────────────────────────────────────────────────────────────
-async def create_exhibit(exhibit_id, title_am, fact_sheet_am, created_by, category_id=None):
+async def create_exhibit(exhibit_id, title_am, fact_sheet_am, created_by):
     async with get_conn() as db:
         await db.execute(
-            """INSERT INTO exhibits (id, title_am, fact_sheet_am, created_by, category_id)
-               VALUES (?, ?, ?, ?, ?)""",
-            (exhibit_id, title_am, fact_sheet_am, created_by, category_id),
+            """INSERT INTO exhibits (id, title_am, fact_sheet_am, created_by)
+               VALUES (?, ?, ?, ?)""",
+            (exhibit_id, title_am, fact_sheet_am, created_by),
         )
         await db.commit()
 
@@ -86,69 +86,203 @@ async def next_sequential_exhibit_id(width=3):
     return str((row[0] or 0) + 1).zfill(width)
 
 
-async def list_exhibits(category_filter=None):
-    """All exhibits (newest first) with `category_name`. category_filter: None = all,
-    "none" = uncategorised only, or a category id."""
-    sql = """SELECT e.*, c.name_hy AS category_name
-             FROM exhibits e LEFT JOIN categories c ON c.id = e.category_id"""
-    params = ()
-    if category_filter == "none":
-        sql += " WHERE e.category_id IS NULL"
-    elif category_filter is not None:
-        sql += " WHERE e.category_id = ?"
-        params = (int(category_filter),)
+async def list_exhibits(tag_ids=None):
+    """All exhibits (newest first), each with `tag_names` (comma-joined Armenian names).
+    tag_ids: None/empty = all; otherwise exhibits having ANY of those tags."""
+    sql = """SELECT e.*,
+                    (SELECT group_concat(t.name_hy, ', ')
+                       FROM exhibit_tags et JOIN tags t ON t.id = et.tag_id
+                      WHERE et.exhibit_id = e.id) AS tag_names
+             FROM exhibits e"""
+    params = []
+    if tag_ids:
+        sql += f" WHERE e.id IN (SELECT exhibit_id FROM exhibit_tags WHERE tag_id IN ({','.join('?' * len(tag_ids))}))"
+        params = [int(t) for t in tag_ids]
     async with get_conn() as db:
         cur = await db.execute(sql + " ORDER BY e.updated_at DESC", params)
         return await cur.fetchall()
 
 
-async def list_live_exhibits_for_lang(language_code):
+async def list_live_exhibits_for_lang(language_code, tag_id=None):
     """Live exhibits ordered by id, each with `title` = the published translated title in
-    `language_code` (falls back to the Armenian staff title)."""
+    `language_code` (falls back to the Armenian staff title). Optional tag filter."""
+    sql = """SELECT e.id, COALESCE(NULLIF(a.title_translated, ''), e.title_am) AS title
+             FROM exhibits e
+             LEFT JOIN audio_cache a ON a.exhibit_id = e.id AND a.language_code = ?
+             WHERE e.status = 'live'"""
+    params = [language_code]
+    if tag_id:
+        sql += " AND e.id IN (SELECT exhibit_id FROM exhibit_tags WHERE tag_id = ?)"
+        params.append(int(tag_id))
+    async with get_conn() as db:
+        cur = await db.execute(sql + " ORDER BY e.id", params)
+        return await cur.fetchall()
+
+
+# ── tags ────────────────────────────────────────────────────────────────
+TRANSLATION_LANGS = [c for c in LANGUAGES if c != "am"]   # tags are entered in Armenian
+
+
+async def list_tags():
+    """Every tag with exhibit_count and translated_count (of the 9 non-Armenian languages)."""
     async with get_conn() as db:
         cur = await db.execute(
-            """SELECT e.id, COALESCE(NULLIF(a.title_translated, ''), e.title_am) AS title
-               FROM exhibits e
-               LEFT JOIN audio_cache a ON a.exhibit_id = e.id AND a.language_code = ?
-               WHERE e.status = 'live'
-               ORDER BY e.id""",
-            (language_code,),
+            """SELECT t.id, t.name_hy, t.sort_order,
+                      (SELECT COUNT(*) FROM exhibit_tags et WHERE et.tag_id = t.id) AS exhibit_count,
+                      (SELECT COUNT(*) FROM tag_translations tt WHERE tt.tag_id = t.id AND tt.lang != 'am') AS translated_count
+               FROM tags t ORDER BY t.sort_order, t.name_hy"""
         )
         return await cur.fetchall()
 
 
-# ── categories ──────────────────────────────────────────────────────────
-async def list_categories():
+async def get_tag(tag_id):
     async with get_conn() as db:
-        cur = await db.execute("SELECT * FROM categories ORDER BY sort_order, name_hy")
-        return await cur.fetchall()
+        cur = await db.execute("SELECT * FROM tags WHERE id = ?", (int(tag_id),))
+        return await cur.fetchone()
 
 
-async def get_or_create_category(name_hy):
-    """Returns the id of the category with this name (case-insensitive), creating it
-    (appended at the end of the sort order) if it doesn't exist."""
+async def count_tags():
+    async with get_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM tags")
+        return (await cur.fetchone())[0]
+
+
+async def find_tag_by_name(name_hy, exclude_id=None):
+    """Case-insensitive lookup done in Python — SQLite's lower() is ASCII-only, so it
+    would treat 'Հանքանյութեր' and 'ՀԱՆՔԱՆՅՈՒԹԵՐ' as different names."""
     name_hy = name_hy.strip()
     async with get_conn() as db:
-        # Compared in Python: SQLite's lower() is ASCII-only, so it would treat
-        # "Հանքանյութեր" and "ՀԱՆՔԱՆՅՈՒԹԵՐ" as different names.
-        cur = await db.execute("SELECT id, name_hy FROM categories")
+        cur = await db.execute("SELECT id, name_hy FROM tags")
         for row in await cur.fetchall():
-            if row[1].casefold() == name_hy.casefold():
-                return row[0]
+            if row["id"] != exclude_id and row["name_hy"].casefold() == name_hy.casefold():
+                return row["id"]
+    return None
+
+
+async def get_or_create_tag(name_hy):
+    """-> (tag_id, created). Reuses an existing tag whose name matches case-insensitively."""
+    name_hy = name_hy.strip()
+    existing = await find_tag_by_name(name_hy)
+    if existing is not None:
+        return existing, False
+    async with get_conn() as db:
         cur = await db.execute(
-            "INSERT INTO categories (name_hy, sort_order) "
-            "VALUES (?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM categories))",
+            "INSERT INTO tags (name_hy, sort_order) "
+            "VALUES (?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM tags))",
             (name_hy,),
         )
         await db.commit()
-        return cur.lastrowid
+        return cur.lastrowid, True
 
 
-async def set_exhibit_category(exhibit_id, category_id):
-    """Deliberately does NOT touch updated_at/staleness — category is metadata, not content."""
+async def rename_tag(tag_id, new_name_hy):
+    """Renames and DROPS the old translations (they translated the old name). Raises ValueError
+    if another tag already has that name."""
+    new_name_hy = new_name_hy.strip()
+    if await find_tag_by_name(new_name_hy, exclude_id=int(tag_id)) is not None:
+        raise ValueError("duplicate")
     async with get_conn() as db:
-        await db.execute("UPDATE exhibits SET category_id = ? WHERE id = ?", (category_id, exhibit_id))
+        await db.execute("UPDATE tags SET name_hy = ? WHERE id = ?", (new_name_hy, int(tag_id)))
+        await db.execute("DELETE FROM tag_translations WHERE tag_id = ?", (int(tag_id),))
         await db.commit()
+
+
+async def merge_tags(src_id, dst_id):
+    """Reassigns every exhibit of `src` to `dst` (no duplicate links), then removes `src`.
+    Returns how many exhibits were linked to src."""
+    src_id, dst_id = int(src_id), int(dst_id)
+    if src_id == dst_id:
+        raise ValueError("same tag")
+    async with get_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM exhibit_tags WHERE tag_id = ?", (src_id,))
+        n = (await cur.fetchone())[0]
+        await db.execute(
+            "INSERT OR IGNORE INTO exhibit_tags (exhibit_id, tag_id) "
+            "SELECT exhibit_id, ? FROM exhibit_tags WHERE tag_id = ?", (dst_id, src_id))
+        await db.execute("DELETE FROM exhibit_tags WHERE tag_id = ?", (src_id,))
+        await db.execute("DELETE FROM tag_translations WHERE tag_id = ?", (src_id,))
+        await db.execute("DELETE FROM tags WHERE id = ?", (src_id,))
+        await db.commit()
+        return n
+
+
+async def delete_tag(tag_id):
+    """Deletes the tag and its links/translations only — never the exhibits. Returns the
+    number of exhibits that were linked."""
+    tag_id = int(tag_id)
+    async with get_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM exhibit_tags WHERE tag_id = ?", (tag_id,))
+        n = (await cur.fetchone())[0]
+        await db.execute("DELETE FROM exhibit_tags WHERE tag_id = ?", (tag_id,))
+        await db.execute("DELETE FROM tag_translations WHERE tag_id = ?", (tag_id,))
+        await db.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+        await db.commit()
+        return n
+
+
+async def get_exhibit_tag_ids(exhibit_id):
+    async with get_conn() as db:
+        cur = await db.execute("SELECT tag_id FROM exhibit_tags WHERE exhibit_id = ?", (exhibit_id,))
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def set_exhibit_tags(exhibit_id, tag_ids):
+    """Replaces the exhibit's tag set. Deliberately does NOT touch updated_at/staleness —
+    tags are metadata, not content."""
+    ids = {int(t) for t in tag_ids}
+    async with get_conn() as db:
+        await db.execute("DELETE FROM exhibit_tags WHERE exhibit_id = ?", (exhibit_id,))
+        await db.executemany(
+            "INSERT OR IGNORE INTO exhibit_tags (exhibit_id, tag_id) "
+            "SELECT ?, id FROM tags WHERE id = ?", [(exhibit_id, t) for t in ids])
+        await db.commit()
+
+
+async def save_tag_translations(tag_id, translations: dict):
+    async with get_conn() as db:
+        await db.execute("DELETE FROM tag_translations WHERE tag_id = ?", (int(tag_id),))
+        await db.executemany(
+            "INSERT INTO tag_translations (tag_id, lang, name) VALUES (?, ?, ?)",
+            [(int(tag_id), lang, name) for lang, name in translations.items()
+             if lang in TRANSLATION_LANGS and (name or "").strip()],
+        )
+        await db.commit()
+
+
+async def list_untranslated_tag_ids():
+    async with get_conn() as db:
+        cur = await db.execute(
+            """SELECT t.id FROM tags t
+               WHERE (SELECT COUNT(*) FROM tag_translations tt WHERE tt.tag_id = t.id AND tt.lang != 'am') < ?
+               ORDER BY t.sort_order""", (len(TRANSLATION_LANGS),))
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def list_live_tags_for_lang(language_code):
+    """Tags with at least one LIVE exhibit, with `live_count` and `label` in the visitor's
+    language (Armenian name when there's no translation — or the language is Armenian)."""
+    async with get_conn() as db:
+        cur = await db.execute(
+            """SELECT t.id, COUNT(e.id) AS live_count,
+                      COALESCE(NULLIF(tt.name, ''), t.name_hy) AS label
+               FROM tags t
+               JOIN exhibit_tags et ON et.tag_id = t.id
+               JOIN exhibits e ON e.id = et.exhibit_id AND e.status = 'live'
+               LEFT JOIN tag_translations tt ON tt.tag_id = t.id AND tt.lang = ? AND ? != 'am'
+               GROUP BY t.id ORDER BY t.sort_order, t.name_hy""",
+            (language_code, language_code),
+        )
+        return await cur.fetchall()
+
+
+async def get_tag_label(tag_id, language_code):
+    async with get_conn() as db:
+        cur = await db.execute(
+            """SELECT COALESCE(NULLIF(tt.name, ''), t.name_hy) AS label FROM tags t
+               LEFT JOIN tag_translations tt ON tt.tag_id = t.id AND tt.lang = ? AND ? != 'am'
+               WHERE t.id = ?""", (language_code, language_code, int(tag_id)))
+        row = await cur.fetchone()
+        return row[0] if row else None
 
 
 async def update_exhibit_content(exhibit_id, title_am=None, fact_sheet_am=None):

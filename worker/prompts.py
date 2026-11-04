@@ -201,3 +201,38 @@ def build_submit_tool(codes) -> dict:
     scripts["properties"] = {c: v for c, v in scripts["properties"].items() if c in codes}
     scripts["required"] = [c for c in scripts["required"] if c in codes]
     return tool
+
+
+# ── Tag-label translation ──────────────────────────────────────────────────
+TAG_TRANSLATE_SYSTEM_PROMPT = """\
+You translate very short museum category labels (tags) from Armenian into \
+other languages. The labels are shown as buttons in a visitor's phone app \
+(for example "Minerals", "Tools", "Fossils"), so they must be short.
+
+Rules:
+1. Translate the label's meaning faithfully; do not add, explain, or expand it.
+2. Keep it as short as the original: a short noun or noun phrase, in the most \
+natural wording a native speaker would expect on a museum button. Plural vs. \
+singular should follow the Armenian.
+3. Capitalize the way that language normally capitalizes a button label. No \
+trailing punctuation, no quotes, no emoji.
+4. Output only via the provided tool call.
+"""
+
+
+def build_tag_translate_tool(codes) -> dict:
+    return {
+        "name": "submit_tag_translations",
+        "description": "Submit the translated tag label for every requested language.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "translations": {
+                    "type": "object",
+                    "properties": {c: {"type": "string", "description": f"{LANGUAGES[c]} label"} for c in codes},
+                    "required": list(codes),
+                }
+            },
+            "required": ["translations"],
+        },
+    }

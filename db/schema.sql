@@ -17,13 +17,6 @@ CREATE TABLE staff_users (
 -- ─────────────────────────────────────────────────────────────────────────
 -- exhibits: one row per physical exhibit / plaque / QR code
 -- ─────────────────────────────────────────────────────────────────────────
--- categories: optional grouping of exhibits (admin-only for now; no visitor navigation yet)
-CREATE TABLE categories (
-    id                   SERIAL PRIMARY KEY,
-    name_hy              TEXT NOT NULL UNIQUE,     -- Armenian display name
-    sort_order           INTEGER NOT NULL DEFAULT 0
-);
-
 CREATE TABLE exhibits (
     id                   TEXT PRIMARY KEY,        -- human exhibit number, e.g. "007"
     title_am             TEXT NOT NULL,            -- staff-entered title (Armenian)
@@ -32,10 +25,34 @@ CREATE TABLE exhibits (
     deep_link            TEXT,                     -- t.me/<bot>?start=exh_<id>
     status               TEXT NOT NULL DEFAULT 'draft'
                           CHECK (status IN ('draft', 'processing', 'review', 'live', 'unpublished', 'failed')),
-    category_id          INTEGER REFERENCES categories(id) ON DELETE SET NULL,  -- nullable
     created_by           BIGINT REFERENCES staff_users(telegram_user_id),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- tags: flat, many-to-many labels for exhibits. Entered in Armenian only;
+-- tag_translations holds the other 9 languages (missing rows = untranslated,
+-- visitor-facing labels fall back to name_hy).
+-- ─────────────────────────────────────────────────────────────────────────
+CREATE TABLE tags (
+    id                   SERIAL PRIMARY KEY,
+    name_hy              TEXT NOT NULL UNIQUE,
+    sort_order           INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE exhibit_tags (
+    exhibit_id           TEXT NOT NULL REFERENCES exhibits(id) ON DELETE CASCADE,
+    tag_id               INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (exhibit_id, tag_id)
+);
+
+CREATE TABLE tag_translations (
+    tag_id               INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    lang                 TEXT NOT NULL
+                          CHECK (lang IN ('am','en','ru','fr','es','de','fa','zh','it','el')),
+    name                 TEXT NOT NULL,
+    PRIMARY KEY (tag_id, lang)
 );
 
 -- ─────────────────────────────────────────────────────────────────────────

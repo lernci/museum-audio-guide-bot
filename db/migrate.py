@@ -9,11 +9,26 @@ import aiosqlite
 
 from db.db import DB_PATH
 
-CATEGORIES_DDL = """CREATE TABLE categories (
+TAGS_DDL = [
+    """CREATE TABLE tags (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
         name_hy    TEXT NOT NULL UNIQUE,
         sort_order INTEGER NOT NULL DEFAULT 0
-    )"""
+    )""",
+    """CREATE TABLE exhibit_tags (
+        exhibit_id TEXT    NOT NULL REFERENCES exhibits(id) ON DELETE CASCADE,
+        tag_id     INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+        PRIMARY KEY (exhibit_id, tag_id)
+    )""",
+    "CREATE INDEX idx_exhibit_tags_tag ON exhibit_tags(tag_id)",
+    """CREATE TABLE tag_translations (
+        tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+        lang   TEXT    NOT NULL
+                CHECK (lang IN ('am','en','ru','fr','es','de','fa','zh','it','el')),
+        name   TEXT    NOT NULL,
+        PRIMARY KEY (tag_id, lang)
+    )""",
+]
 
 # NOTE: the rebuild helpers below index into FRESH_SCHEMA by position — new
 # tables are appended at the END, never inserted.
@@ -33,7 +48,6 @@ FRESH_SCHEMA = [
         deep_link     TEXT,
         status        TEXT NOT NULL DEFAULT 'draft'
                        CHECK (status IN ('draft', 'processing', 'review', 'live', 'unpublished', 'failed')),
-        category_id   INTEGER REFERENCES categories(id) ON DELETE SET NULL,
         created_by    BIGINT REFERENCES staff_users(telegram_user_id),
         created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -102,7 +116,7 @@ FRESH_SCHEMA = [
         viewed_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )""",
     "CREATE INDEX idx_exhibit_views_exhibit ON exhibit_views(exhibit_id)",
-    CATEGORIES_DDL,
+    *TAGS_DDL,
 ]
 
 
@@ -228,13 +242,31 @@ async def migrate() -> None:
             if name not in audio_cols:
                 await conn.execute(f"ALTER TABLE audio_cache ADD COLUMN {name} {decl}")
 
-        # Categories (admin-only grouping): table + nullable exhibits.category_id.
-        if "categories" not in await _tables(conn):
-            await conn.execute(CATEGORIES_DDL)
-        if "category_id" not in await _columns(conn, "exhibits"):
+        # Tags (flat, many-to-many) — replaces the short-lived single-category design.
+        existing = await _tables(conn)
+        if "tags" not in existing:
+            await conn.execute(TAGS_DDL[0])
+        if "exhibit_tags" not in existing:
+            await conn.execute(TAGS_DDL[1])
+            await conn.execute(TAGS_DDL[2])
+        if "tag_translations" not in existing:
+            await conn.execute(TAGS_DDL[3])
+
+        # Carry any categories/category_id data over into tags, then drop the old structures.
+        if "categories" in await _tables(conn):
             await conn.execute(
-                "ALTER TABLE exhibits ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL"
+                "INSERT OR IGNORE INTO tags (id, name_hy, sort_order) SELECT id, name_hy, sort_order FROM categories"
             )
+            if "category_id" in await _columns(conn, "exhibits"):
+                await conn.execute(
+                    """INSERT OR IGNORE INTO exhibit_tags (exhibit_id, tag_id)
+                       SELECT id, category_id FROM exhibits
+                       WHERE category_id IS NOT NULL AND category_id IN (SELECT id FROM tags)"""
+                )
+        if "category_id" in await _columns(conn, "exhibits"):
+            await _rebuild_exhibits(conn)       # rebuilt from FRESH_SCHEMA: no category_id column
+        if "categories" in await _tables(conn):
+            await conn.execute("DROP TABLE categories")
 
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.commit()

@@ -3,7 +3,9 @@ import re
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart, CommandObject
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
+                           KeyboardButton, Message, MenuButtonCommands, ReplyKeyboardMarkup)
 
 from db import db
 
@@ -76,6 +78,27 @@ HINT_MESSAGES = {
     "el": "Πληκτρολογήστε τον αριθμό ενός εκθέματος (π.χ. 001) ή χρησιμοποιήστε το κουμπί της λίστας.",
 }
 
+BACK_LABELS = {
+    "am": "🔙 Հետ", "en": "🔙 Back", "ru": "🔙 Назад", "fr": "🔙 Retour", "es": "🔙 Volver",
+    "de": "🔙 Zurück", "fa": "🔙 بازگشت", "zh": "🔙 返回", "it": "🔙 Indietro", "el": "🔙 Πίσω",
+}
+
+ALL_LABELS = {
+    "am": "Բոլորը", "en": "All", "ru": "Все", "fr": "Tous", "es": "Todos",
+    "de": "Alle", "fa": "همه", "zh": "全部", "it": "Tutti", "el": "Όλα",
+}
+
+# Persistent reply-keyboard buttons: native word, plus " / English" for every language but English
+# (so a visitor who picked the wrong language can still find them).
+_BROWSE_WORD = {"am": "Ցանկ", "ru": "Список", "fr": "Liste", "es": "Lista", "de": "Liste",
+                "fa": "فهرست", "zh": "列表", "it": "Elenco", "el": "Λίστα"}
+_LANGUAGE_WORD = {"am": "Լեզու", "ru": "Язык", "fr": "Langue", "es": "Idioma", "de": "Sprache",
+                  "fa": "زبان", "zh": "语言", "it": "Lingua", "el": "Γλώσσα"}
+MENU_BROWSE_LABELS = {c: (f"🗂 {_BROWSE_WORD[c]} / Browse" if c in _BROWSE_WORD else "🗂 Browse") for c in LANGUAGE_LABELS}
+MENU_LANGUAGE_LABELS = {c: (f"🌐 {_LANGUAGE_WORD[c]} / Language" if c in _LANGUAGE_WORD else "🌐 Language") for c in LANGUAGE_LABELS}
+_BROWSE_LABEL_TO_LANG = {v: k for k, v in MENU_BROWSE_LABELS.items()}
+_LANGUAGE_LABELS_SET = set(MENU_LANGUAGE_LABELS.values())
+
 PAGE_SIZE = 8
 TELEGRAM_TEXT_LIMIT = 4096
 
@@ -129,7 +152,7 @@ async def welcome_after_language(callback: CallbackQuery):
         return
     _user_lang[callback.from_user.id] = lang
     await callback.answer()
-    await callback.message.answer(WELCOME_MESSAGES[lang], reply_markup=_list_button(lang))
+    await callback.message.answer(WELCOME_MESSAGES[lang], reply_markup=reply_menu(lang))
 
 
 def _list_button(lang: str) -> InlineKeyboardMarkup:
@@ -138,45 +161,129 @@ def _list_button(lang: str) -> InlineKeyboardMarkup:
     ]])
 
 
-def _list_keyboard(items, lang: str, page: int) -> InlineKeyboardMarkup:
+def reply_menu(lang: str) -> ReplyKeyboardMarkup:
+    """Persistent bottom keyboard: visitors never need slash commands."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=MENU_BROWSE_LABELS[lang]), KeyboardButton(text=MENU_LANGUAGE_LABELS[lang])]],
+        resize_keyboard=True, is_persistent=True,
+    )
+
+
+async def setup_bot_menu(bot) -> None:
+    """Registers /start so Telegram's Menu button appears (called once at startup)."""
+    await bot.set_my_commands([BotCommand(command="start", description="Start · Սկսել · Старт")])
+    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+
+def _browse_keyboard(items, all_count: int, tags, lang: str, tag_id: int, page: int) -> InlineKeyboardMarkup:
+    """One message, three levels of buttons: tag filters (All + tags with >=1 live exhibit, with
+    counts, in the visitor's language), the current exhibit page, and navigation/back."""
+    rows = []
+    if tags:
+        chips = [InlineKeyboardButton(text=("✅ " if not tag_id else "") + f"{ALL_LABELS[lang]} ({all_count})",
+                                      callback_data=f"br:{lang}:0:0")]
+        chips += [InlineKeyboardButton(text=("✅ " if t["id"] == tag_id else "") + f"{t['label']} ({t['live_count']})"[:60],
+                                       callback_data=f"br:{lang}:{t['id']}:0") for t in tags]
+        rows += [chips[i:i + 2] for i in range(0, len(chips), 2)]
     pages = max(1, -(-len(items) // PAGE_SIZE))
     page = min(max(page, 0), pages - 1)
-    rows = [
+    rows += [
         [InlineKeyboardButton(text=f"{row['id']} — {row['title']}"[:64], callback_data=f"ex:{row['id']}:{lang}")]
         for row in items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
     ]
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀", callback_data=f"listp:{lang}:{page - 1}"))
+        nav.append(InlineKeyboardButton(text="◀", callback_data=f"br:{lang}:{tag_id}:{page - 1}"))
     if pages > 1:
         nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="noop"))
     if page < pages - 1:
-        nav.append(InlineKeyboardButton(text="▶", callback_data=f"listp:{lang}:{page + 1}"))
+        nav.append(InlineKeyboardButton(text="▶", callback_data=f"br:{lang}:{tag_id}:{page + 1}"))
     if nav:
         rows.append(nav)
+    # Back: from a tag view -> the All list; from the All list -> the welcome screen.
+    rows.append([InlineKeyboardButton(text=BACK_LABELS[lang],
+                                      callback_data=f"br:{lang}:0:0" if tag_id else f"bk:{lang}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.callback_query(F.data.startswith(("list:", "listp:")))
+async def _browse_view(lang: str, tag_id: int, page: int):
+    """-> (header_text, keyboard) or None when nothing is live at all."""
+    all_items = await db.list_live_exhibits_for_lang(lang)
+    if not all_items:
+        return None
+    tags = await db.list_live_tags_for_lang(lang)
+    if tag_id and tag_id not in {t["id"] for t in tags}:
+        tag_id = 0                                        # tag vanished / has no live exhibits
+    items = await db.list_live_exhibits_for_lang(lang, tag_id) if tag_id else all_items
+    header = LIST_LABELS[lang]
+    if tag_id:
+        header += " · " + next(t["label"] for t in tags if t["id"] == tag_id)
+    return header, _browse_keyboard(items, len(all_items), tags, lang, tag_id, page)
+
+
+async def _open_browse(message: Message, user_id: int, lang: str):
+    """Entry point ('🗂 Browse'): lands directly on the All list as a new message."""
+    _user_lang[user_id] = lang
+    view = await _browse_view(lang, 0, 0)
+    if view is None:
+        await message.answer(NOT_READY_MESSAGES[lang])
+        return
+    await message.answer(view[0], reply_markup=view[1])
+
+
+@router.callback_query(F.data.startswith("list:"))
 async def show_exhibit_list(callback: CallbackQuery):
-    """'list:<lang>' (welcome button) posts a new list message; 'listp:<lang>:<page>'
-    (prev/next) edits that message's keyboard in place."""
-    kind, lang, *rest = callback.data.split(":")
-    page_s = rest[0] if rest else "0"
-    if lang not in LANGUAGE_LABELS or not page_s.isdigit():
+    lang = callback.data.split(":")[1]
+    await callback.answer()
+    if lang in LANGUAGE_LABELS:
+        await _open_browse(callback.message, callback.from_user.id, lang)
+
+
+@router.callback_query(F.data.startswith("br:"))
+async def browse_navigate(callback: CallbackQuery):
+    """Tag filter / pagination / back-to-All: edits the list message in place."""
+    try:
+        _, lang, tag_s, page_s = callback.data.split(":")
+        tag_id, page = int(tag_s), int(page_s)
+    except ValueError:
+        await callback.answer()
+        return
+    if lang not in LANGUAGE_LABELS:
         await callback.answer()
         return
     _user_lang[callback.from_user.id] = lang
-    items = await db.list_live_exhibits_for_lang(lang)
     await callback.answer()
-    if not items:
+    view = await _browse_view(lang, tag_id, page)
+    if view is None:
         await callback.message.answer(NOT_READY_MESSAGES[lang])
         return
-    keyboard = _list_keyboard(items, lang, int(page_s))
-    if kind == "listp":
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
-    else:
-        await callback.message.answer(LIST_LABELS[lang], reply_markup=keyboard)
+    try:
+        await callback.message.edit_text(view[0], reply_markup=view[1])
+    except TelegramBadRequest:
+        pass                                              # "message is not modified" (same view tapped again)
+
+
+@router.callback_query(F.data.startswith("bk:"))
+async def back_to_welcome(callback: CallbackQuery):
+    lang = callback.data.split(":")[1]
+    await callback.answer()
+    if lang not in LANGUAGE_LABELS:
+        return
+    try:
+        await callback.message.edit_text(WELCOME_MESSAGES[lang], reply_markup=_list_button(lang))
+    except TelegramBadRequest:
+        pass
+
+
+@router.message(F.chat.type == "private", F.text.in_(set(MENU_BROWSE_LABELS.values())))
+async def menu_browse(message: Message):
+    lang = _BROWSE_LABEL_TO_LANG[message.text]
+    await _open_browse(message, message.from_user.id, lang)
+
+
+@router.message(F.chat.type == "private", F.text.in_(_LANGUAGE_LABELS_SET))
+async def menu_language(message: Message):
+    await message.answer("Please choose your language:", reply_markup=build_language_keyboard("welcome"))
 
 
 @router.callback_query(F.data == "noop")
