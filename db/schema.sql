@@ -17,6 +17,13 @@ CREATE TABLE staff_users (
 -- ─────────────────────────────────────────────────────────────────────────
 -- exhibits: one row per physical exhibit / plaque / QR code
 -- ─────────────────────────────────────────────────────────────────────────
+-- categories: optional grouping of exhibits (admin-only for now; no visitor navigation yet)
+CREATE TABLE categories (
+    id                   SERIAL PRIMARY KEY,
+    name_hy              TEXT NOT NULL UNIQUE,     -- Armenian display name
+    sort_order           INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE exhibits (
     id                   TEXT PRIMARY KEY,        -- human exhibit number, e.g. "007"
     title_am             TEXT NOT NULL,            -- staff-entered title (Armenian)
@@ -25,6 +32,7 @@ CREATE TABLE exhibits (
     deep_link            TEXT,                     -- t.me/<bot>?start=exh_<id>
     status               TEXT NOT NULL DEFAULT 'draft'
                           CHECK (status IN ('draft', 'processing', 'review', 'live', 'unpublished', 'failed')),
+    category_id          INTEGER REFERENCES categories(id) ON DELETE SET NULL,  -- nullable
     created_by           BIGINT REFERENCES staff_users(telegram_user_id),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -77,6 +85,7 @@ CREATE TABLE audio_cache (
     -- This is what makes "exhibit stays live with old content while staff
     -- edit/regenerate it" true without any extra locking.
     script_stale         INTEGER NOT NULL DEFAULT 1,  -- draft script doesn't match current Armenian source
+    script_stale_reason  TEXT,                     -- why script_stale is set: 'source' (fact sheet changed) | 'armenian' (Armenian script edited -> retranslate) | NULL (never generated)
     audio_stale          INTEGER NOT NULL DEFAULT 1,  -- draft audio doesn't match current draft script
     draft_script_text    TEXT,
     draft_title_translated TEXT,

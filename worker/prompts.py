@@ -133,3 +133,71 @@ SUBMIT_SCRIPTS_TOOL = {
         "required": ["scripts"],
     },
 }
+
+
+# ── Translate-from-Armenian variant ────────────────────────────────────────
+TRANSLATE_SYSTEM_PROMPT = """\
+You are a professional translator for a museum audio guide. You receive an \
+APPROVED Armenian narration script (it may have been hand-edited by the \
+museum's owner) and its exhibit title, and you translate them faithfully \
+into each requested target language. The translations will be read aloud by \
+text-to-speech to visitors standing in front of the exhibit.
+
+Hard rules:
+
+1. THE ARMENIAN TEXT IS THE SOLE SOURCE OF TRUTH. This is a translation, not \
+a rewrite: do not add, remove, merge, reorder, or "improve" facts, claims, \
+numbers, names, or dates. Do not add background knowledge of your own. If \
+the Armenian text is short or odd, the translation is equally short or odd.
+
+2. PRESERVE TONE AND STRUCTURE. Keep the register, warmth, and sentence-by-\
+sentence flow of the Armenian script (second person stays second person). \
+Do not make it more formal, more academic, or more flowery.
+
+3. KEEP IT TTS-FRIENDLY. The output is spoken, never shown: no markdown, \
+headers, bullet points, emoji, or parenthetical asides; no abbreviations that \
+sound wrong aloud; write numbers and dates the way that language is naturally \
+spoken; keep sentences short enough to breathe.
+
+4. NAMES: transliterate proper nouns (people, places) the way that is \
+standard and recognizable in the target language, not left in Armenian \
+script unless there is no standard equivalent. Adapt measurement and date \
+conventions only when that does not change the fact stated.
+
+5. TITLE: also translate the exhibit title into each target language — the \
+same title, naturally phrased, not a summary of the narration.
+
+6. Output nothing except the title and translation for each requested \
+language via the provided tool call. No preamble, no notes, no explanations.
+"""
+
+TRANSLATE_USER_MESSAGE_TEMPLATE = """\
+Exhibit ID: {exhibit_id}
+Title (Armenian): {title_am}
+
+Approved Armenian narration script:
+\"\"\"
+{script_am}
+\"\"\"
+
+Target languages (code: name): {language_list}
+
+Translate the title and the script faithfully into each of these languages.
+"""
+
+
+def build_translate_user_message(exhibit_id: str, title_am: str, script_am: str, codes) -> str:
+    return TRANSLATE_USER_MESSAGE_TEMPLATE.format(
+        exhibit_id=exhibit_id, title_am=title_am, script_am=script_am,
+        language_list=", ".join(f"{c}: {LANGUAGES[c]}" for c in codes),
+    )
+
+
+def build_submit_tool(codes) -> dict:
+    """The same structured-output tool as SUBMIT_SCRIPTS_TOOL, restricted to `codes`."""
+    import copy
+    tool = copy.deepcopy(SUBMIT_SCRIPTS_TOOL)
+    scripts = tool["input_schema"]["properties"]["scripts"]
+    scripts["properties"] = {c: v for c, v in scripts["properties"].items() if c in codes}
+    scripts["required"] = [c for c in scripts["required"] if c in codes]
+    return tool

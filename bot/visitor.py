@@ -51,6 +51,34 @@ NOT_FOUND_MESSAGES = {
     "el": "Το έκθεμα δεν βρέθηκε ή δεν είναι ακόμη διαθέσιμο. Ελέγξτε τον αριθμό και δοκιμάστε ξανά.",
 }
 
+READ_TEXT_LABELS = {
+    "am": "📖 Կարդալ տեքստը", "en": "📖 Read text", "ru": "📖 Читать текст", "fr": "📖 Lire le texte",
+    "es": "📖 Leer el texto", "de": "📖 Text lesen", "fa": "📖 خواندن متن", "zh": "📖 阅读文字",
+    "it": "📖 Leggi il testo", "el": "📖 Ανάγνωση κειμένου",
+}
+
+LIST_LABELS = {
+    "am": "🗂 Ցուցանմուշների ցանկ", "en": "🗂 Exhibit list", "ru": "🗂 Список экспонатов", "fr": "🗂 Liste des pièces",
+    "es": "🗂 Lista de piezas", "de": "🗂 Liste der Exponate", "fa": "🗂 فهرست نمایه‌ها", "zh": "🗂 展品列表",
+    "it": "🗂 Elenco dei reperti", "el": "🗂 Λίστα εκθεμάτων",
+}
+
+HINT_MESSAGES = {
+    "am": "Մուտքագրեք ցուցանմուշի համարը (օրինակ՝ 001) կամ օգտվեք ցանկի կոճակից։",
+    "en": "Type an exhibit number (e.g. 001) or use the list button.",
+    "ru": "Введите номер экспоната (например, 001) или воспользуйтесь кнопкой списка.",
+    "fr": "Saisissez un numéro de pièce (par ex. 001) ou utilisez le bouton de la liste.",
+    "es": "Escriba el número de una pieza (por ejemplo, 001) o use el botón de la lista.",
+    "de": "Geben Sie eine Exponatnummer ein (z. B. 001) oder nutzen Sie die Listen-Schaltfläche.",
+    "fa": "شماره یک نمایه را وارد کنید (مثلاً 001) یا از دکمه فهرست استفاده کنید.",
+    "zh": "请输入展品编号（例如 001），或使用列表按钮。",
+    "it": "Digita il numero di un reperto (ad es. 001) oppure usa il pulsante dell'elenco.",
+    "el": "Πληκτρολογήστε τον αριθμό ενός εκθέματος (π.χ. 001) ή χρησιμοποιήστε το κουμπί της λίστας.",
+}
+
+PAGE_SIZE = 8
+TELEGRAM_TEXT_LIMIT = 4096
+
 # Visitor's last chosen language (in-memory; falls back to exhibit_views after a restart).
 _user_lang: dict[int, str] = {}
 
@@ -101,7 +129,102 @@ async def welcome_after_language(callback: CallbackQuery):
         return
     _user_lang[callback.from_user.id] = lang
     await callback.answer()
-    await callback.message.answer(WELCOME_MESSAGES[lang])
+    await callback.message.answer(WELCOME_MESSAGES[lang], reply_markup=_list_button(lang))
+
+
+def _list_button(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=LIST_LABELS[lang], callback_data=f"list:{lang}")
+    ]])
+
+
+def _list_keyboard(items, lang: str, page: int) -> InlineKeyboardMarkup:
+    pages = max(1, -(-len(items) // PAGE_SIZE))
+    page = min(max(page, 0), pages - 1)
+    rows = [
+        [InlineKeyboardButton(text=f"{row['id']} — {row['title']}"[:64], callback_data=f"ex:{row['id']}:{lang}")]
+        for row in items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    ]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀", callback_data=f"listp:{lang}:{page - 1}"))
+    if pages > 1:
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶", callback_data=f"listp:{lang}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith(("list:", "listp:")))
+async def show_exhibit_list(callback: CallbackQuery):
+    """'list:<lang>' (welcome button) posts a new list message; 'listp:<lang>:<page>'
+    (prev/next) edits that message's keyboard in place."""
+    kind, lang, *rest = callback.data.split(":")
+    page_s = rest[0] if rest else "0"
+    if lang not in LANGUAGE_LABELS or not page_s.isdigit():
+        await callback.answer()
+        return
+    _user_lang[callback.from_user.id] = lang
+    items = await db.list_live_exhibits_for_lang(lang)
+    await callback.answer()
+    if not items:
+        await callback.message.answer(NOT_READY_MESSAGES[lang])
+        return
+    keyboard = _list_keyboard(items, lang, int(page_s))
+    if kind == "listp":
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+    else:
+        await callback.message.answer(LIST_LABELS[lang], reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "noop")
+async def _noop(callback: CallbackQuery):
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ex:"))
+async def deliver_from_list(callback: CallbackQuery):
+    _, exhibit_id, lang = callback.data.split(":")
+    _user_lang[callback.from_user.id] = lang
+    await callback.answer()
+    await _send_guide(callback.message, callback.from_user.id, await db.get_exhibit(exhibit_id), lang)
+
+
+def split_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
+    """Split on paragraph, then line, then sentence/space boundaries so no chunk exceeds
+    `limit`; hard-cuts only a single unbroken run longer than the limit."""
+    text = text.strip()
+    chunks = []
+    while len(text) > limit:
+        window = text[:limit]
+        cut = max(window.rfind("\n\n"), window.rfind("\n"), window.rfind(". "), window.rfind("։ "), window.rfind(" "))
+        if cut < limit // 2:
+            cut = limit  # no sensible boundary in the second half of the window
+        else:
+            cut += 1
+        chunks.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+@router.callback_query(F.data.startswith("txt:"))
+async def send_script_text(callback: CallbackQuery):
+    _, exhibit_id, lang = callback.data.split(":")
+    await callback.answer()
+    exhibit = await db.get_exhibit(exhibit_id)
+    if exhibit is None or exhibit["status"] != "live":
+        await callback.message.answer(NOT_READY_MESSAGES.get(lang, NOT_READY_MESSAGES["en"]))
+        return
+    cached = await db.get_cached_voice(exhibit_id, lang)
+    if cached is None or not cached["script_text"]:
+        await callback.message.answer(NOT_READY_MESSAGES.get(lang, NOT_READY_MESSAGES["en"]))
+        return
+    for chunk in split_text(cached["script_text"]):
+        await callback.message.answer(chunk)
 
 
 async def _find_live_exhibit(number_text: str):
@@ -167,7 +290,12 @@ async def _send_guide(target: Message, user_id: int, exhibit, lang: str):
     if photos:
         caption = cached["title_translated"] or exhibit["title_am"]
         await target.answer_photo(photos[0]["telegram_file_id"], caption=caption)
-    await target.answer_voice(cached["telegram_file_id"])
+    await target.answer_voice(
+        cached["telegram_file_id"],
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=READ_TEXT_LABELS[lang], callback_data=f"txt:{exhibit_id}:{lang}")
+        ]]),
+    )
 
     async with db.get_conn() as conn:
         await conn.execute(
@@ -175,3 +303,13 @@ async def _send_guide(target: Message, user_id: int, exhibit, lang: str):
             (exhibit_id, user_id, lang),
         )
         await conn.commit()
+
+
+@router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
+async def non_numeric_text(message: Message):
+    """Registered after typed_exhibit_number, so only non-numeric text lands here."""
+    lang = await _known_language(message.from_user.id)
+    if lang not in LANGUAGE_LABELS:
+        await message.answer("Please choose your language:", reply_markup=build_language_keyboard("welcome"))
+        return
+    await message.answer(HINT_MESSAGES[lang], reply_markup=_list_button(lang))

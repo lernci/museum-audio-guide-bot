@@ -77,8 +77,14 @@ def create_app(bot) -> FastAPI:
     async def dashboard(request: Request):
         if (redirect := require_login(request)) is not None:
             return redirect
-        exhibits = await db.list_exhibits()
-        return templates.TemplateResponse(request, "dashboard.html", {"exhibits": exhibits})
+        category_filter = request.query_params.get("category") or None
+        if category_filter not in (None, "none") and not category_filter.isdigit():
+            category_filter = None
+        exhibits = await db.list_exhibits(category_filter)
+        return templates.TemplateResponse(
+            request, "dashboard.html",
+            {"exhibits": exhibits, "categories": await db.list_categories(), "category_filter": category_filter},
+        )
 
     # ── new exhibit (Stage 1 only — Scripts/Audio/Publish happen on the
     #    detail page once the exhibit exists) ───────────────────────────
@@ -88,7 +94,8 @@ def create_app(bot) -> FastAPI:
             return redirect
         return templates.TemplateResponse(
             request, "exhibit_new.html",
-            {"error": None, "id_error": None, "exhibit_id": "", "title_am": "", "fact_sheet_text": ""},
+            {"error": None, "id_error": None, "exhibit_id": "", "title_am": "", "fact_sheet_text": "",
+             "categories": await db.list_categories(), "selected_category": "", "new_category": ""},
         )
 
     @app.post("/exhibits/new", name="exhibit_new_submit")
@@ -97,6 +104,8 @@ def create_app(bot) -> FastAPI:
         exhibit_id: str = Form(""),
         title_am: str = Form(...),
         fact_sheet_text: str = Form(""),
+        category: str = Form(""),
+        new_category: str = Form(""),
         fact_sheet_file: UploadFile | None = None,
         photos: list[UploadFile] = None,
     ):
@@ -104,7 +113,9 @@ def create_app(bot) -> FastAPI:
             return redirect
 
         exhibit_id = exhibit_id.strip()
-        form_values = {"exhibit_id": exhibit_id, "title_am": title_am, "fact_sheet_text": fact_sheet_text}
+        form_values = {"exhibit_id": exhibit_id, "title_am": title_am, "fact_sheet_text": fact_sheet_text,
+                       "selected_category": category, "new_category": new_category,
+                       "categories": await db.list_categories()}
 
         def render_error(status_code=400, **ctx):
             return templates.TemplateResponse(
@@ -131,12 +142,19 @@ def create_app(bot) -> FastAPI:
         if not photo_files:
             return render_error(error="At least one photo is required.")
 
+        if category == NEW_CATEGORY and not new_category.strip():
+            return render_error(error="Type a name for the new category, or pick an existing one.")
+
         file_ids = await _upload_photos(request.app.state.bot, photo_files[:MAX_PHOTOS])
+        # Created only now that everything else validated, so a rejected form never leaves
+        # an orphan category behind.
+        category_id = await _resolve_category(category, new_category)
         for _attempt in range(5):
             if auto_id:
                 exhibit_id = await db.next_sequential_exhibit_id()
             try:
-                await db.create_exhibit(exhibit_id, title_am.strip(), fact_sheet_am, created_by=None)
+                await db.create_exhibit(exhibit_id, title_am.strip(), fact_sheet_am, created_by=None,
+                                        category_id=category_id)
                 break
             except sqlite3.IntegrityError:
                 # Lost a race with another submit for the same ID.
@@ -165,9 +183,24 @@ def create_app(bot) -> FastAPI:
             {
                 "exhibit": exhibit, "photos": photos, "audio_rows": audio_rows,
                 "publish_problems": publish_problems,
+                "categories": await db.list_categories(),
                 "generate_error": request.query_params.get("generate_error"),
             },
         )
+
+    # ── Category (metadata only: does not stale scripts/audio, unlike Stage 1) ──
+    @app.post("/exhibits/{exhibit_id}/category", name="exhibit_save_category")
+    async def exhibit_save_category(
+        request: Request, exhibit_id: str, category: str = Form(""), new_category: str = Form(""),
+    ):
+        if (redirect := require_login(request)) is not None:
+            return redirect
+        if await db.get_exhibit(exhibit_id) is None:
+            return HTMLResponse("Exhibit not found.", status_code=404)
+        if category == NEW_CATEGORY and not new_category.strip():
+            return HTMLResponse("Type a name for the new category.", status_code=400)
+        await db.set_exhibit_category(exhibit_id, await _resolve_category(category, new_category))
+        return RedirectResponse(request.url_for("exhibit_detail", exhibit_id=exhibit_id), status_code=303)
 
     # ── Stage 1 — Source ─────────────────────────────────────────────────
     @app.post("/exhibits/{exhibit_id}/source", name="exhibit_save_source")
@@ -199,19 +232,40 @@ def create_app(bot) -> FastAPI:
 
     # ── Stage 2 — Scripts ────────────────────────────────────────────────
     @app.post("/exhibits/{exhibit_id}/generate-scripts", name="exhibit_generate_scripts")
-    async def exhibit_generate_scripts(request: Request, exhibit_id: str):
+    async def exhibit_generate_scripts(request: Request, exhibit_id: str, confirm_overwrite: str = Form("")):
         if (redirect := require_login(request)) is not None:
             return redirect
         if await db.get_exhibit(exhibit_id) is None:
             return HTMLResponse("Exhibit not found.", status_code=404)
+
+        def back(error=None):
+            url = str(request.url_for("exhibit_detail", exhibit_id=exhibit_id))
+            return RedirectResponse(url + (f"?generate_error={quote(error)}" if error else ""), status_code=303)
+
+        # Full redo overwrites all 10 scripts — including hand-edited Armenian. The page asks
+        # for confirmation in the browser; this server-side check covers a stale page/tab.
+        existing = await db.get_all_audio_rows(exhibit_id)
+        if any(r["draft_script_text"] for r in existing.values()) and confirm_overwrite != "1":
+            return back("Scripts already exist: “Generate scripts” would overwrite all 10, including any Armenian "
+                        "edits. Confirm on the button, or use “Translate from Armenian” to keep the Armenian text.")
         try:
             await pipeline.generate_scripts_draft(exhibit_id)
         except Exception as exc:  # noqa: BLE001 — surfaced on the detail page
-            return RedirectResponse(
-                str(request.url_for("exhibit_detail", exhibit_id=exhibit_id)) + f"?generate_error={quote(str(exc))}",
-                status_code=303,
-            )
-        return RedirectResponse(request.url_for("exhibit_detail", exhibit_id=exhibit_id), status_code=303)
+            return back(str(exc))
+        return back()
+
+    @app.post("/exhibits/{exhibit_id}/translate-from-armenian", name="exhibit_translate_from_armenian")
+    async def exhibit_translate_from_armenian(request: Request, exhibit_id: str):
+        if (redirect := require_login(request)) is not None:
+            return redirect
+        if await db.get_exhibit(exhibit_id) is None:
+            return HTMLResponse("Exhibit not found.", status_code=404)
+        url = str(request.url_for("exhibit_detail", exhibit_id=exhibit_id))
+        try:
+            await pipeline.translate_from_armenian_draft(exhibit_id)
+        except Exception as exc:  # noqa: BLE001 — surfaced on the detail page
+            return RedirectResponse(url + f"?generate_error={quote(str(exc))}", status_code=303)
+        return RedirectResponse(url, status_code=303)
 
     @app.post("/exhibits/{exhibit_id}/scripts/{lang}", name="exhibit_save_script")
     async def exhibit_save_script(
@@ -339,6 +393,18 @@ def _ranged_response(request: Request, data: bytes, media_type: str) -> Response
                 },
             )
     return Response(content=data, media_type=media_type, headers={"Accept-Ranges": "bytes"})
+
+
+NEW_CATEGORY = "__new__"
+
+
+async def _resolve_category(category: str, new_category: str):
+    """Form value -> category id: '' = none, '__new__' = create/reuse by name, else an existing id."""
+    if category == NEW_CATEGORY:
+        return await db.get_or_create_category(new_category)
+    if category.isdigit():
+        return int(category)
+    return None
 
 
 async def _resolve_fact_sheet(plain_text: str, upload: UploadFile | None) -> str | None:

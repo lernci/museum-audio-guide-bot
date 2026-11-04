@@ -12,7 +12,7 @@
 </div>
 {% endif %}
 
-{% if generate_error %}<p class="error">Script generation failed: {{ generate_error }}</p>{% endif %}
+{% if generate_error %}<p class="error">Script step failed: {{ generate_error }}</p>{% endif %}
 
 <!-- ── Stage 1 — Source ─────────────────────────────────────────────── -->
 <section class="stage">
@@ -39,20 +39,38 @@
     </label>
     <button type="submit" class="btn">Save</button>
   </form>
+  <form method="post" action="{{ request.url_for('exhibit_save_category', exhibit_id=exhibit['id']) }}" class="exhibit-form">
+    {% set selected_category = exhibit['category_id'] %}{% set new_category = '' %}
+    {% include "_category_field.html" %}
+    <button type="submit" class="btn">Save category</button>
+    <span class="hint">Category is metadata only — saving it does not outdate scripts or audio.</span>
+  </form>
 </section>
 
 <!-- ── Stage 2+3 — Scripts & Audio ──────────────────────────────────── -->
 <section class="stage">
   <h2>Stage 2 — Scripts &amp; Stage 3 — Audio</h2>
   <div class="stage-actions">
-    <form method="post" action="{{ request.url_for('exhibit_generate_scripts', exhibit_id=exhibit['id']) }}">
-      <button type="submit" class="btn">Generate scripts</button>
+    {% set has_scripts = audio_rows.values()|selectattr('draft_script_text')|list|length > 0 %}
+    <form method="post" action="{{ request.url_for('exhibit_generate_scripts', exhibit_id=exhibit['id']) }}"
+          {% if has_scripts %}onsubmit="if (!confirm('This overwrites all 10 scripts, including any edits to the Armenian script.\n\nTo keep the Armenian text and only redo the other 9, use “Translate from Armenian” instead.\n\nOverwrite everything?')) return false; this.confirm_overwrite.value = '1';"{% endif %}>
+      <input type="hidden" name="confirm_overwrite" value="">
+      <button type="submit" class="btn">Generate scripts{% if has_scripts %} (full redo){% endif %}</button>
     </form>
+    {% set am_row = audio_rows.get('am') %}
+    {% if am_row and am_row['draft_script_text'] %}
+    <form method="post" action="{{ request.url_for('exhibit_translate_from_armenian', exhibit_id=exhibit['id']) }}"
+          onsubmit="return confirm('Retranslate the other 9 languages from the current Armenian script? Their scripts will be replaced (the Armenian text is not touched).');">
+      <button type="submit" class="btn">Translate from Armenian</button>
+    </form>
+    {% endif %}
     <form method="post" action="{{ request.url_for('exhibit_generate_audio', exhibit_id=exhibit['id']) }}">
       <button type="submit" class="btn">Generate audio</button>
     </form>
   </div>
-  <p class="hint">"Generate scripts" makes one call that writes a fresh script for all 10 languages.
+  <p class="hint">"Generate scripts" writes all 10 scripts from the fact sheet (initial pass / full redo — overwrites
+    everything, including Armenian edits). "Translate from Armenian" keeps your edited Armenian script and retranslates
+    only the other 9 from it.
     "Generate audio" only re-voices languages whose audio is missing or outdated — already-good ones are left alone.</p>
 
   <div class="lang-grid">
@@ -63,7 +81,8 @@
       {% if not row or not row['draft_script_text'] %}
         <p class="badge badge-missing">no script yet</p>
       {% else %}
-        {% if row['script_stale'] %}<p class="badge badge-stale">source changed — regenerate scripts</p>{% endif %}
+        {% if row['script_stale'] and row['script_stale_reason'] == 'armenian' %}<p class="badge badge-stale">Armenian changed — retranslate</p>
+        {% elif row['script_stale'] %}<p class="badge badge-stale">source changed — regenerate scripts</p>{% endif %}
         <form method="post" action="{{ request.url_for('exhibit_save_script', exhibit_id=exhibit['id'], lang=code) }}" class="script-form">
           <input type="text" name="title_translated" value="{{ row['draft_title_translated'] or '' }}" placeholder="Localized title">
           <textarea name="script_text" rows="6">{{ row['draft_script_text'] }}</textarea>

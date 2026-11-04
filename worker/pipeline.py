@@ -29,7 +29,8 @@ from db import db
 from utils.audio import to_telegram_voice, probe_duration_seconds
 from utils.hayq_tts import synthesize_apittshy
 from utils.qr import build_deep_link, generate_qr_png
-from worker.prompts import SYSTEM_PROMPT, build_user_message, SUBMIT_SCRIPTS_TOOL, LANGUAGES
+from worker.prompts import (SYSTEM_PROMPT, build_user_message, SUBMIT_SCRIPTS_TOOL, LANGUAGES,
+                            TRANSLATE_SYSTEM_PROMPT, build_translate_user_message, build_submit_tool)
 
 TMP_DIR = Path("tmp_audio")
 QR_DIR = Path("qr_codes")
@@ -175,6 +176,28 @@ async def _generate_scripts(exhibit_id: str, title_am: str, fact_sheet_am: str) 
     return json.loads(tool_calls[0].function.arguments)["scripts"]
 
 
+async def _translate_scripts(exhibit_id: str, title_am: str, script_am: str, codes: list) -> dict:
+    """Faithful translation of an approved Armenian script into `codes` — same structured
+    tool-output format as _generate_scripts, different (translate-only) system prompt."""
+    tool = build_submit_tool(codes)
+    client = _get_openai_client()
+    response = await client.chat.completions.create(
+        model=OPENAI_SCRIPTS_MODEL,
+        messages=[
+            {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
+            {"role": "user", "content": build_translate_user_message(exhibit_id, title_am, script_am, codes)},
+        ],
+        tools=[{"type": "function", "function": {
+            "name": tool["name"], "description": tool["description"], "parameters": tool["input_schema"],
+        }}],
+        tool_choice={"type": "function", "function": {"name": tool["name"]}},
+    )
+    tool_calls = response.choices[0].message.tool_calls
+    if not tool_calls:
+        raise RuntimeError("OpenAI response missing submit_docent_scripts tool call")
+    return json.loads(tool_calls[0].function.arguments)["scripts"]
+
+
 async def _synthesize_and_upload(bot, exhibit_id: str, lang: str, script_text: str) -> dict:
     """Synth -> ffmpeg -> upload to the log channel. Shared by both the old
     monolithic Telegram-FSM pipeline and the web admin's staged draft
@@ -288,6 +311,32 @@ async def generate_scripts_draft(exhibit_id: str) -> None:
     await db.save_draft_scripts(exhibit_id, scripts)
 
 
+class TranslateError(Exception):
+    """Pre-condition / result problem shown to staff on the exhibit page."""
+
+
+async def translate_from_armenian_draft(exhibit_id: str) -> None:
+    """Retranslate the 9 non-Armenian drafts from the CURRENT (possibly hand-edited)
+    Armenian draft script. Replaces only those 9; the Armenian row is untouched. All-or-
+    nothing: if the model's answer is missing/empty for any language, nothing is saved."""
+    rows = await db.get_all_audio_rows(exhibit_id)
+    am = rows.get("am")
+    if am is None or not (am["draft_script_text"] or "").strip():
+        raise TranslateError("There is no Armenian script yet — use “Generate scripts” first.")
+    if am["script_stale"]:
+        raise TranslateError("The Armenian script is outdated relative to the fact sheet — "
+                             "use “Generate scripts” (or save the Armenian script by hand) first.")
+    exhibit = await db.get_exhibit(exhibit_id)
+    codes = [c for c in LANGUAGES if c != "am"]
+    result = await _translate_scripts(
+        exhibit_id, am["draft_title_translated"] or exhibit["title_am"], am["draft_script_text"], codes)
+    missing = [c for c in codes if not (result.get(c, {}).get("narration") or "").strip()
+               or not (result.get(c, {}).get("title") or "").strip()]
+    if missing:
+        raise TranslateError(f"Translation incomplete (missing: {', '.join(missing)}) — nothing was changed.")
+    await db.save_translated_scripts(exhibit_id, {c: result[c] for c in codes})
+
+
 async def generate_audio_draft(bot, exhibit_id: str, langs: list[str]) -> list[str]:
     """Stage 3 — TTS only for the given languages (the caller is expected to
     have already filtered to missing-or-stale ones). Returns the subset that
@@ -314,6 +363,8 @@ def publish_readiness(rows: dict) -> list[str]:
         row = rows.get(code)
         if row is None or row["draft_status"] != "ready":
             problems.append(f"{name} ({code}): audio missing")
+        elif row["script_stale"] and row["script_stale_reason"] == "armenian":
+            problems.append(f"{name} ({code}): Armenian changed — retranslate")
         elif row["script_stale"]:
             problems.append(f"{name} ({code}): script outdated — generate scripts")
         elif row["audio_stale"]:

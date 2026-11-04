@@ -22,12 +22,12 @@ async def get_conn():
 
 
 # ── exhibits ────────────────────────────────────────────────────────────
-async def create_exhibit(exhibit_id, title_am, fact_sheet_am, created_by):
+async def create_exhibit(exhibit_id, title_am, fact_sheet_am, created_by, category_id=None):
     async with get_conn() as db:
         await db.execute(
-            """INSERT INTO exhibits (id, title_am, fact_sheet_am, created_by)
-               VALUES (?, ?, ?, ?)""",
-            (exhibit_id, title_am, fact_sheet_am, created_by),
+            """INSERT INTO exhibits (id, title_am, fact_sheet_am, created_by, category_id)
+               VALUES (?, ?, ?, ?, ?)""",
+            (exhibit_id, title_am, fact_sheet_am, created_by, category_id),
         )
         await db.commit()
 
@@ -86,10 +86,69 @@ async def next_sequential_exhibit_id(width=3):
     return str((row[0] or 0) + 1).zfill(width)
 
 
-async def list_exhibits():
+async def list_exhibits(category_filter=None):
+    """All exhibits (newest first) with `category_name`. category_filter: None = all,
+    "none" = uncategorised only, or a category id."""
+    sql = """SELECT e.*, c.name_hy AS category_name
+             FROM exhibits e LEFT JOIN categories c ON c.id = e.category_id"""
+    params = ()
+    if category_filter == "none":
+        sql += " WHERE e.category_id IS NULL"
+    elif category_filter is not None:
+        sql += " WHERE e.category_id = ?"
+        params = (int(category_filter),)
     async with get_conn() as db:
-        cur = await db.execute("SELECT * FROM exhibits ORDER BY updated_at DESC")
+        cur = await db.execute(sql + " ORDER BY e.updated_at DESC", params)
         return await cur.fetchall()
+
+
+async def list_live_exhibits_for_lang(language_code):
+    """Live exhibits ordered by id, each with `title` = the published translated title in
+    `language_code` (falls back to the Armenian staff title)."""
+    async with get_conn() as db:
+        cur = await db.execute(
+            """SELECT e.id, COALESCE(NULLIF(a.title_translated, ''), e.title_am) AS title
+               FROM exhibits e
+               LEFT JOIN audio_cache a ON a.exhibit_id = e.id AND a.language_code = ?
+               WHERE e.status = 'live'
+               ORDER BY e.id""",
+            (language_code,),
+        )
+        return await cur.fetchall()
+
+
+# ── categories ──────────────────────────────────────────────────────────
+async def list_categories():
+    async with get_conn() as db:
+        cur = await db.execute("SELECT * FROM categories ORDER BY sort_order, name_hy")
+        return await cur.fetchall()
+
+
+async def get_or_create_category(name_hy):
+    """Returns the id of the category with this name (case-insensitive), creating it
+    (appended at the end of the sort order) if it doesn't exist."""
+    name_hy = name_hy.strip()
+    async with get_conn() as db:
+        # Compared in Python: SQLite's lower() is ASCII-only, so it would treat
+        # "Հանքանյութեր" and "ՀԱՆՔԱՆՅՈՒԹԵՐ" as different names.
+        cur = await db.execute("SELECT id, name_hy FROM categories")
+        for row in await cur.fetchall():
+            if row[1].casefold() == name_hy.casefold():
+                return row[0]
+        cur = await db.execute(
+            "INSERT INTO categories (name_hy, sort_order) "
+            "VALUES (?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM categories))",
+            (name_hy,),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def set_exhibit_category(exhibit_id, category_id):
+    """Deliberately does NOT touch updated_at/staleness — category is metadata, not content."""
+    async with get_conn() as db:
+        await db.execute("UPDATE exhibits SET category_id = ? WHERE id = ?", (category_id, exhibit_id))
+        await db.commit()
 
 
 async def update_exhibit_content(exhibit_id, title_am=None, fact_sheet_am=None):
@@ -212,7 +271,8 @@ async def mark_source_edited(exhibit_id):
     await ensure_audio_rows(exhibit_id)
     async with get_conn() as db:
         await db.execute(
-            "UPDATE audio_cache SET script_stale = 1, audio_stale = 1 WHERE exhibit_id = ?",
+            "UPDATE audio_cache SET script_stale = 1, script_stale_reason = 'source', audio_stale = 1 "
+            "WHERE exhibit_id = ?",
             (exhibit_id,),
         )
         await db.commit()
@@ -225,13 +285,30 @@ async def save_draft_scripts(exhibit_id, scripts: dict):
     async with get_conn() as db:
         await db.executemany(
             """INSERT INTO audio_cache (exhibit_id, language_code, draft_title_translated,
-                                         draft_script_text, script_stale, audio_stale)
-               VALUES (?, ?, ?, ?, 0, 1)
+                                         draft_script_text, script_stale, script_stale_reason, audio_stale)
+               VALUES (?, ?, ?, ?, 0, NULL, 1)
                ON CONFLICT(exhibit_id, language_code) DO UPDATE SET
                    draft_title_translated = excluded.draft_title_translated,
                    draft_script_text = excluded.draft_script_text,
-                   script_stale = 0, audio_stale = 1""",
+                   script_stale = 0, script_stale_reason = NULL, audio_stale = 1""",
             [(exhibit_id, code, entry["title"], entry["narration"]) for code, entry in scripts.items()],
+        )
+        await db.commit()
+
+
+async def save_translated_scripts(exhibit_id, scripts: dict):
+    """'Translate from Armenian' result — replaces ONLY the languages in `scripts`
+    (the caller passes the 9 non-Armenian ones; the Armenian row is never touched).
+    Each replaced script is fresh (script_stale clears, 'armenian' reason cleared)
+    and its draft audio no longer matches (audio_stale sets)."""
+    assert "am" not in scripts, "translation must never overwrite the Armenian source"
+    async with get_conn() as db:
+        await db.executemany(
+            """UPDATE audio_cache
+               SET draft_title_translated = ?, draft_script_text = ?,
+                   script_stale = 0, script_stale_reason = NULL, audio_stale = 1
+               WHERE exhibit_id = ? AND language_code = ?""",
+            [(e["title"], e["narration"], exhibit_id, code) for code, e in scripts.items()],
         )
         await db.commit()
 
@@ -239,15 +316,35 @@ async def save_draft_scripts(exhibit_id, scripts: dict):
 async def save_draft_script_manual(exhibit_id, language_code, title_translated, script_text):
     """A staff member hand-edited one language's script directly — treated
     as the new authoritative text for that language (script_stale clears),
-    but its existing draft audio no longer matches (audio_stale sets)."""
+    but its existing draft audio no longer matches (audio_stale sets).
+
+    If the language is Armenian (the translation source) AND its title/script
+    actually changed, the other languages' scripts become outdated relative to
+    it (script_stale=1, reason 'armenian' — shown as "Armenian changed —
+    retranslate" and blocking publish). A language that is already stale for a
+    reason keeps that reason. Editing any other language touches only its own row."""
     async with get_conn() as db:
+        cur = await db.execute(
+            "SELECT draft_title_translated, draft_script_text FROM audio_cache WHERE exhibit_id = ? AND language_code = ?",
+            (exhibit_id, language_code),
+        )
+        before = await cur.fetchone()
         await db.execute(
             """UPDATE audio_cache
                SET draft_title_translated = ?, draft_script_text = ?,
-                   script_stale = 0, audio_stale = 1
+                   script_stale = 0, script_stale_reason = NULL, audio_stale = 1
                WHERE exhibit_id = ? AND language_code = ?""",
             (title_translated, script_text, exhibit_id, language_code),
         )
+        changed = before is None or (before["draft_title_translated"], before["draft_script_text"]) != (title_translated, script_text)
+        if language_code == "am" and changed:
+            await db.execute(
+                """UPDATE audio_cache
+                   SET script_stale = 1,
+                       script_stale_reason = CASE WHEN script_stale = 1 THEN script_stale_reason ELSE 'armenian' END
+                   WHERE exhibit_id = ? AND language_code != 'am' AND draft_script_text IS NOT NULL""",
+            (exhibit_id,),
+            )
         await db.commit()
 
 

@@ -1,0 +1,22 @@
+{# expects: categories, selected_category (id as str, '' or '__new__'), new_category #}
+<label>Category <span class="hint">(optional — admin grouping only, not shown to visitors)</span>
+  <select name="category" class="category-select">
+    <option value="">— none —</option>
+    {% for c in categories %}
+    <option value="{{ c['id'] }}"{% if selected_category|string == c['id']|string %} selected{% endif %}>{{ c['name_hy'] }}</option>
+    {% endfor %}
+    <option value="__new__"{% if selected_category == '__new__' %} selected{% endif %}>➕ Add new category…</option>
+  </select>
+  <input type="text" name="new_category" class="new-category" value="{{ new_category or '' }}"
+         placeholder="New category name (Armenian)" maxlength="80" autocomplete="off"
+         style="{% if selected_category != '__new__' %}display:none{% endif %}">
+</label>
+<script>
+  document.querySelectorAll('.category-select').forEach(function (sel) {
+    sel.addEventListener('change', function () {
+      var input = sel.parentElement.querySelector('.new-category');
+      input.style.display = sel.value === '__new__' ? '' : 'none';
+      if (sel.value === '__new__') input.focus();
+    });
+  });
+</script>

@@ -9,6 +9,14 @@ import aiosqlite
 
 from db.db import DB_PATH
 
+CATEGORIES_DDL = """CREATE TABLE categories (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name_hy    TEXT NOT NULL UNIQUE,
+        sort_order INTEGER NOT NULL DEFAULT 0
+    )"""
+
+# NOTE: the rebuild helpers below index into FRESH_SCHEMA by position — new
+# tables are appended at the END, never inserted.
 FRESH_SCHEMA = [
     """CREATE TABLE staff_users (
         telegram_user_id BIGINT PRIMARY KEY,
@@ -25,6 +33,7 @@ FRESH_SCHEMA = [
         deep_link     TEXT,
         status        TEXT NOT NULL DEFAULT 'draft'
                        CHECK (status IN ('draft', 'processing', 'review', 'live', 'unpublished', 'failed')),
+        category_id   INTEGER REFERENCES categories(id) ON DELETE SET NULL,
         created_by    BIGINT REFERENCES staff_users(telegram_user_id),
         created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -56,6 +65,7 @@ FRESH_SCHEMA = [
         error_message           TEXT,
         generated_at            TIMESTAMP,
         script_stale            INTEGER NOT NULL DEFAULT 1,
+        script_stale_reason     TEXT,
         audio_stale             INTEGER NOT NULL DEFAULT 1,
         draft_script_text       TEXT,
         draft_title_translated  TEXT,
@@ -92,6 +102,7 @@ FRESH_SCHEMA = [
         viewed_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )""",
     "CREATE INDEX idx_exhibit_views_exhibit ON exhibit_views(exhibit_id)",
+    CATEGORIES_DDL,
 ]
 
 
@@ -201,6 +212,7 @@ async def migrate() -> None:
         audio_cols = await _columns(conn, "audio_cache")
         draft_columns = [
             ("script_stale", "INTEGER NOT NULL DEFAULT 1"),
+            ("script_stale_reason", "TEXT"),
             ("audio_stale", "INTEGER NOT NULL DEFAULT 1"),
             ("draft_script_text", "TEXT"),
             ("draft_title_translated", "TEXT"),
@@ -215,6 +227,14 @@ async def migrate() -> None:
         for name, decl in draft_columns:
             if name not in audio_cols:
                 await conn.execute(f"ALTER TABLE audio_cache ADD COLUMN {name} {decl}")
+
+        # Categories (admin-only grouping): table + nullable exhibits.category_id.
+        if "categories" not in await _tables(conn):
+            await conn.execute(CATEGORIES_DDL)
+        if "category_id" not in await _columns(conn, "exhibits"):
+            await conn.execute(
+                "ALTER TABLE exhibits ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL"
+            )
 
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.commit()
