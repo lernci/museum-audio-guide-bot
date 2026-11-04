@@ -25,4 +25,11 @@
   </tbody>
 </table>
 {% endif %}
+
+<section class="entrance-qr" style="margin-top:2rem">
+  <h2>Museum entrance QR</h2>
+  <p>Opens the bot without an exhibit (language menu, then visitors type an exhibit number). For printing at the entrance.</p>
+  <img src="{{ request.url_for('media_entrance_qr') }}" alt="Museum entrance QR" width="180" height="180">
+  <p><a class="btn" href="{{ request.url_for('media_entrance_qr') }}?download=1">Download PNG</a></p>
+</section>
 {% endblock %}

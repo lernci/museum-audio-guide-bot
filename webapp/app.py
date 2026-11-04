@@ -285,6 +285,14 @@ def create_app(bot) -> FastAPI:
         data = generate_qr_png_bytes(exhibit["deep_link"])
         return _ranged_response(request, data, "image/png")
 
+    @app.get("/media/entrance-qr", name="media_entrance_qr")
+    async def media_entrance_qr(request: Request, download: int = 0):
+        if (redirect := require_login(request)) is not None:
+            return redirect
+        data = generate_qr_png_bytes(f"https://t.me/{pipeline.BOT_USERNAME}")
+        headers = {"Content-Disposition": 'attachment; filename="museum-entrance-qr.png"'} if download else {}
+        return Response(data, media_type="image/png", headers=headers)
+
     @app.get("/media/audio/{exhibit_id}/{lang}", name="media_audio")
     async def media_audio(request: Request, exhibit_id: str, lang: str):
         if (redirect := require_login(request)) is not None:

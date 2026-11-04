@@ -15,7 +15,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 
 from db import db
 from worker.pipeline import enqueue_exhibit, retry_language
-from bot.visitor import LANGUAGE_LABELS
+from bot.visitor import build_language_keyboard
 from utils.fact_sheet import extract_fact_sheet_text
 
 router = Router()
@@ -306,11 +306,7 @@ async def review_exhibit(message: Message, command: CommandObject):
     else:
         await message.answer(caption)
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label, callback_data=f"adminlang:{exhibit_id}:{code}")]
-        for code, label in LANGUAGE_LABELS.items()
-    ])
-    await message.answer("Pick a language to proofread:", reply_markup=keyboard)
+    await message.answer("Pick a language to proofread:", reply_markup=build_language_keyboard(f"adminlang:{exhibit_id}"))
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("adminlang:"))
