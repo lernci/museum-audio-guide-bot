@@ -83,7 +83,8 @@ async def test_visitor():
 
     # --- welcome now carries the persistent reply keyboard (Browse + Language)
     c, m = cb("welcome:en", uid=11); await visitor.welcome_after_language(c)
-    kb = m.out[0][2]
+    assert m.out[0][:2] == ("edit", "🇬🇧 English ✓") and m.out[0][2] is None        # picker collapsed
+    kb = m.out[-1][2]
     assert [b.text for b in kb.keyboard[0]] == ["🗂 Browse", "🌐 Language"] and kb.is_persistent
 
     # --- list pagination: 12 live exhibits -> 8 + 4 (no tags yet -> no tag row)

@@ -302,7 +302,7 @@ async def test_visitor_browse():
 
     # welcome -> reply keyboard
     c, m = cb("welcome:en", uid=5); await visitor.welcome_after_language(c)
-    assert [b.text for b in m.out[0][2].keyboard[0]] == ["🗂 Browse", "🌐 Language"]
+    assert [b.text for b in m.out[-1][2].keyboard[0]] == ["🗂 Browse", "🌐 Language"]
     # reply-keyboard Browse -> lands on ALL list directly
     msg = Msg("🗂 Browse", uid=5); await visitor.menu_browse(msg)
     header, kb = msg.out[0][1], msg.out[0][2]
@@ -364,13 +364,13 @@ async def test_visitor_browse():
     import inspect
     router_src = inspect.getsource(visitor)
     assert "menu_browse" in router_src and "menu_language" in router_src
-    # setMyCommands + menu button
-    bot = SimpleNamespace(cmds=None, menu=None)
-    async def smc(cmds): bot.cmds = cmds
-    async def scmb(menu_button=None): bot.menu = menu_button
-    bot.set_my_commands, bot.set_chat_menu_button = smc, scmb
+    # setMyCommands + menu button (details: test_ux.py)
+    sent = []
+    async def smc(cmds, language_code=None): sent.append((language_code, [c.command for c in cmds]))
+    async def scmb(menu_button=None): sent.append(("menu", type(menu_button).__name__))
+    bot = SimpleNamespace(set_my_commands=smc, set_chat_menu_button=scmb)
     await visitor.setup_bot_menu(bot)
-    assert [c.command for c in bot.cmds] == ["start"] and type(bot.menu).__name__ == "MenuButtonCommands"
+    assert sent[0] == (None, ["start", "language", "list"]) and sent[-1] == ("menu", "MenuButtonCommands")
     print("reply keyboard (10 languages) + language button + setMyCommands/menu button OK")
 
 

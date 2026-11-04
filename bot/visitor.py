@@ -1,8 +1,9 @@
 """Visitor-side: deep link -> language picker -> instant cached voice + photo."""
+import logging
 import re
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart, CommandObject
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
                            KeyboardButton, Message, MenuButtonCommands, ReplyKeyboardMarkup)
@@ -10,6 +11,7 @@ from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton, Inli
 from db import db
 
 router = Router()
+log = logging.getLogger(__name__)
 
 LANGUAGE_LABELS = {
     "am": "🇦🇲 Հայերեն", "en": "🇬🇧 English", "ru": "🇷🇺 Русский", "fr": "🇫🇷 Français",
@@ -152,7 +154,27 @@ async def welcome_after_language(callback: CallbackQuery):
         return
     _user_lang[callback.from_user.id] = lang
     await callback.answer()
+    await _collapse_language_picker(callback, lang)
     await callback.message.answer(WELCOME_MESSAGES[lang], reply_markup=reply_menu(lang))
+
+
+async def _collapse_language_picker(callback: CallbackQuery, lang: str) -> None:
+    """Replace the 10-button language message with a short confirmation ("🇬🇧 English ✓") so
+    stale language buttons don't hang above whatever gets sent next."""
+    try:
+        await callback.message.edit_text(f"{LANGUAGE_LABELS[lang]} ✓")      # no reply_markup -> keyboard removed
+    except TelegramBadRequest:
+        pass                                                                 # already edited / too old: harmless
+
+
+@router.callback_query(F.data.startswith("listfirst:"))
+async def list_after_language(callback: CallbackQuery):
+    """Language picked after /list with no known language -> collapse picker, open the list."""
+    lang = callback.data.split(":")[1]
+    await callback.answer()
+    if lang in LANGUAGE_LABELS:
+        await _collapse_language_picker(callback, lang)
+        await _open_browse(callback.message, callback.from_user.id, lang)
 
 
 def _list_button(lang: str) -> InlineKeyboardMarkup:
@@ -169,9 +191,36 @@ def reply_menu(lang: str) -> ReplyKeyboardMarkup:
     )
 
 
+# Menu-button command descriptions per language. Telegram's language_code is ISO 639-1, so
+# Armenian is "hy" (our internal code is "am"). Users whose app language isn't one of these
+# fall back to the default (English) list.
+COMMAND_DESCRIPTIONS = {
+    "start":    {"am": "Սկսել", "en": "Start", "ru": "Начать", "fr": "Démarrer", "es": "Iniciar",
+                 "de": "Starten", "fa": "شروع", "zh": "开始", "it": "Avvia", "el": "Έναρξη"},
+    "language": {"am": "Փոխել լեզուն", "en": "Change language", "ru": "Сменить язык", "fr": "Changer de langue",
+                 "es": "Cambiar idioma", "de": "Sprache ändern", "fa": "تغییر زبان", "zh": "更换语言",
+                 "it": "Cambia lingua", "el": "Αλλαγή γλώσσας"},
+    "list":     {"am": "Ցուցանմուշների ցանկ", "en": "Exhibit list", "ru": "Список экспонатов", "fr": "Liste des pièces",
+                 "es": "Lista de piezas", "de": "Liste der Exponate", "fa": "فهرست نمایه‌ها", "zh": "展品列表",
+                 "it": "Elenco dei reperti", "el": "Λίστα εκθεμάτων"},
+}
+TELEGRAM_LANGUAGE_CODE = {"am": "hy"}          # everything else maps to itself
+
+
+def _commands_for(lang: str) -> list:
+    return [BotCommand(command=c, description=COMMAND_DESCRIPTIONS[c][lang]) for c in ("start", "language", "list")]
+
+
 async def setup_bot_menu(bot) -> None:
-    """Registers /start so Telegram's Menu button appears (called once at startup)."""
-    await bot.set_my_commands([BotCommand(command="start", description="Start · Սկսել · Старт")])
+    """Registers /start, /language, /list (default = English, plus a localized list per language
+    code) so Telegram's Menu button shows them in the visitor's own language. One failing
+    language never blocks the others."""
+    await bot.set_my_commands(_commands_for("en"))
+    for lang in LANGUAGE_LABELS:
+        try:
+            await bot.set_my_commands(_commands_for(lang), language_code=TELEGRAM_LANGUAGE_CODE.get(lang, lang))
+        except Exception:  # noqa: BLE001
+            log.warning("set_my_commands failed for %s", lang, exc_info=True)
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
@@ -286,6 +335,21 @@ async def menu_language(message: Message):
     await message.answer("Please choose your language:", reply_markup=build_language_keyboard("welcome"))
 
 
+# Slash-command twins of the two reply-keyboard buttons (Telegram's Menu button lists them).
+@router.message(F.chat.type == "private", Command("language"))
+async def cmd_language(message: Message):
+    await menu_language(message)
+
+
+@router.message(F.chat.type == "private", Command("list"))
+async def cmd_list(message: Message):
+    lang = await _known_language(message.from_user.id)
+    if lang in LANGUAGE_LABELS:
+        await _open_browse(message, message.from_user.id, lang)
+    else:                                                  # no language yet: pick one, then open the list
+        await message.answer("Please choose your language:", reply_markup=build_language_keyboard("listfirst"))
+
+
 @router.callback_query(F.data == "noop")
 async def _noop(callback: CallbackQuery):
     await callback.answer()
@@ -375,9 +439,13 @@ async def typed_exhibit_number(message: Message):
 @router.callback_query(lambda c: c.data and c.data.startswith("lang:"))
 async def deliver_guide(callback: CallbackQuery):
     _, exhibit_id, lang = callback.data.split(":")
+    if lang not in LANGUAGE_LABELS:
+        await callback.answer()
+        return
     _user_lang[callback.from_user.id] = lang
     exhibit = await db.get_exhibit(exhibit_id)
     await callback.answer()
+    await _collapse_language_picker(callback, lang)
     await _send_guide(callback.message, callback.from_user.id, exhibit, lang)
 
 
@@ -393,10 +461,16 @@ async def _send_guide(target: Message, user_id: int, exhibit, lang: str):
         await target.answer("Sorry, this language isn't available for this exhibit yet.")
         return
 
+    # Telegram allows ONE reply_markup per message, and the voice note carries the inline
+    # "Read text" button — so the persistent Browse/Language keyboard rides on the photo (or, for
+    # an exhibit with no photo, on a title message). Deep-link visitors get navigation this way
+    # without ever passing through the welcome flow.
     photos = await db.get_exhibit_photos(exhibit_id)
+    caption = cached["title_translated"] or exhibit["title_am"]
     if photos:
-        caption = cached["title_translated"] or exhibit["title_am"]
-        await target.answer_photo(photos[0]["telegram_file_id"], caption=caption)
+        await target.answer_photo(photos[0]["telegram_file_id"], caption=caption, reply_markup=reply_menu(lang))
+    else:
+        await target.answer(caption, reply_markup=reply_menu(lang))
     await target.answer_voice(
         cached["telegram_file_id"],
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
