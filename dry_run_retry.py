@@ -1,5 +1,5 @@
 """Third scenario: after a language fails, /retry (worker.pipeline.retry_language)
-should succeed using the stored script (no Claude re-call) and flip the exhibit
+should succeed using the stored script (no script re-generation call) and flip the exhibit
 to 'ready' once every language is actually ready.
 """
 import asyncio
@@ -53,7 +53,7 @@ async def main():
         print("status after initial run (expect 'failed'):", exhibit["status"])
         assert exhibit["status"] == "failed"
 
-        claude_calls_before_retry = fake_generate_scripts.__wrapped__ if hasattr(fake_generate_scripts, "__wrapped__") else None
+        script_calls_before_retry = fake_generate_scripts.__wrapped__ if hasattr(fake_generate_scripts, "__wrapped__") else None
 
         # now retry just the failed language
         await pipeline.retry_language(bot, "DRY03", "de")

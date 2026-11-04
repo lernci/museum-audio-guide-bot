@@ -112,7 +112,7 @@ async def process_exhibit(bot, exhibit_id: str) -> None:
         )
     await db.mark_jobs_by_type(exhibit_id, "qr", status="success")
 
-    # 2) One Claude call -> localized title + narration script for all 10 languages.
+    # 2) One OpenAI call -> localized title + narration script for all 10 languages.
     try:
         scripts = await _generate_scripts(exhibit_id, exhibit["title_am"], exhibit["fact_sheet_am"])
     except Exception as exc:
@@ -276,7 +276,7 @@ async def _tts_and_cache_draft(bot, exhibit_id: str, lang: str, title_translated
 async def retry_language(bot, exhibit_id: str, lang: str) -> None:
     """Handler for the owner `/retry <exhibit_id> <lang>` command — works from
     both 'failed' and 'review' states. Reuses the already-generated title +
-    script (no Claude call) and retries just the TTS step. Returns the exhibit
+    script (no script-generation call) and retries just the TTS step. Returns the exhibit
     to 'review' once no language is left failing."""
     cached = await db.get_audio_row(exhibit_id, lang)
     if cached is None or not cached["script_text"]:

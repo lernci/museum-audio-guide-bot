@@ -1,5 +1,5 @@
 """Dry run: exercises the real pipeline code (DB, QR, ffmpeg, caching,
-concurrency, job recovery) with Claude + all three TTS providers mocked out,
+concurrency, job recovery) with OpenAI script generation + all three TTS providers mocked out,
 and a fake Bot standing in for Telegram. No network calls, no API keys.
 """
 import asyncio

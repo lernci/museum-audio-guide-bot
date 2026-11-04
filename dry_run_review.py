@@ -1,6 +1,6 @@
 """Fourth scenario: the full review workflow end to end — draft -> processing
 -> review -> publish -> live — exercising the actual bot.admin/bot.visitor
-handlers (not just worker.pipeline), with Claude + TTS mocked as in dry_run.py.
+handlers (not just worker.pipeline), with OpenAI + TTS mocked as in dry_run.py.
 Confirms the visitor deep-link is gated on status == 'live' at every earlier
 stage, and that /publish is what flips it.
 """

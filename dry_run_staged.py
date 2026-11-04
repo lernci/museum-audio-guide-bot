@@ -1,6 +1,6 @@
 """Dry run for the web admin's staged workflow (Source -> Scripts -> Audio ->
 Publish) and its core staleness/draft-vs-published-content guarantees, with
-Claude/OpenAI + TTS mocked exactly like dry_run.py. Covers:
+OpenAI + TTS mocked exactly like dry_run.py. Covers:
 
 1. Editing the fact sheet after scripts+audio exist marks everything stale,
    and a full regenerate-then-publish cycle clears that and goes live.
