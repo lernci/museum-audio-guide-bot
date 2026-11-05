@@ -312,7 +312,12 @@ async def generate_scripts_draft(exhibit_id: str) -> None:
 
 
 class TranslateError(Exception):
-    """Pre-condition / result problem shown to staff on the exhibit page."""
+    """Pre-condition / result problem shown to staff on the exhibit page. `code` (+ params) lets
+    the panel render a localized message; `str(exc)` stays the English text."""
+
+    def __init__(self, message, code=None, **params):
+        super().__init__(message)
+        self.code, self.params = code, params
 
 
 async def translate_from_armenian_draft(exhibit_id: str) -> None:
@@ -322,10 +327,11 @@ async def translate_from_armenian_draft(exhibit_id: str) -> None:
     rows = await db.get_all_audio_rows(exhibit_id)
     am = rows.get("am")
     if am is None or not (am["draft_script_text"] or "").strip():
-        raise TranslateError("There is no Armenian script yet — use “Generate scripts” first.")
+        raise TranslateError("There is no Armenian script yet — use “Generate scripts” first.", code="no_armenian")
     if am["script_stale"]:
         raise TranslateError("The Armenian script is outdated relative to the fact sheet — "
-                             "use “Generate scripts” (or save the Armenian script by hand) first.")
+                             "use “Generate scripts” (or save the Armenian script by hand) first.",
+                             code="armenian_stale")
     exhibit = await db.get_exhibit(exhibit_id)
     codes = [c for c in LANGUAGES if c != "am"]
     result = await _translate_scripts(
@@ -333,7 +339,8 @@ async def translate_from_armenian_draft(exhibit_id: str) -> None:
     missing = [c for c in codes if not (result.get(c, {}).get("narration") or "").strip()
                or not (result.get(c, {}).get("title") or "").strip()]
     if missing:
-        raise TranslateError(f"Translation incomplete (missing: {', '.join(missing)}) — nothing was changed.")
+        raise TranslateError(f"Translation incomplete (missing: {', '.join(missing)}) — nothing was changed.",
+                             code="incomplete", missing=", ".join(missing))
     await db.save_translated_scripts(exhibit_id, {c: result[c] for c in codes})
 
 
@@ -354,22 +361,37 @@ async def generate_audio_draft(bot, exhibit_id: str, langs: list[str]) -> list[s
     return [lang for lang, r in zip(langs, results) if isinstance(r, Exception)]
 
 
+def publish_issues(rows: dict) -> list[tuple]:
+    """Structured form of publish_readiness: [(language_code, kind)], kind one of
+    'audio_missing' | 'armenian_changed' | 'script_outdated' | 'audio_outdated'. The admin panel
+    renders these in Armenian; publish_readiness() below renders the (unchanged) English text."""
+    issues = []
+    for code in LANGUAGES:
+        row = rows.get(code)
+        if row is None or row["draft_status"] != "ready":
+            issues.append((code, "audio_missing"))
+        elif row["script_stale"] and row["script_stale_reason"] == "armenian":
+            issues.append((code, "armenian_changed"))
+        elif row["script_stale"]:
+            issues.append((code, "script_outdated"))
+        elif row["audio_stale"]:
+            issues.append((code, "audio_outdated"))
+    return issues
+
+
+_ISSUE_TEXT_EN = {
+    "audio_missing": "audio missing",
+    "armenian_changed": "Armenian changed — retranslate",
+    "script_outdated": "script outdated — generate scripts",
+    "audio_outdated": "audio outdated — generate audio",
+}
+
+
 def publish_readiness(rows: dict) -> list[str]:
     """Checks every expected language's draft against the staleness rules
     and returns a human-readable reason per language that isn't ready to
     publish yet — empty list means Publish may proceed."""
-    problems = []
-    for code, name in LANGUAGES.items():
-        row = rows.get(code)
-        if row is None or row["draft_status"] != "ready":
-            problems.append(f"{name} ({code}): audio missing")
-        elif row["script_stale"] and row["script_stale_reason"] == "armenian":
-            problems.append(f"{name} ({code}): Armenian changed — retranslate")
-        elif row["script_stale"]:
-            problems.append(f"{name} ({code}): script outdated — generate scripts")
-        elif row["audio_stale"]:
-            problems.append(f"{name} ({code}): audio outdated — generate audio")
-    return problems
+    return [f"{LANGUAGES[code]} ({code}): {_ISSUE_TEXT_EN[kind]}" for code, kind in publish_issues(rows)]
 
 
 async def publish_draft(exhibit_id: str) -> list[str]:

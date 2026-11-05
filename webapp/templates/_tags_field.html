@@ -1,15 +1,55 @@
-{# expects: tags (rows with id, name_hy), selected_tags (list of ids as int/str), new_tags (text) #}
-<fieldset class="tags-field">
-  <legend>Tags <span class="hint">(optional — flat labels used for visitor browsing; keep them few and general)</span></legend>
-  {% if tags %}
-  <div class="tag-checks">
+{# Tag chips. expects: tags (rows: id, name_hy, translated_count), selected_tags (ids), pending_tags (names).
+   Chips are toggle pills (hidden checkbox + styled span): filled = selected, outlined = not. New tags typed
+   into the inline box become selected "pending" chips at once and are created (or reused, case-insensitively)
+   on save. The enclosing form supplies the save button. #}
+<fieldset class="tags-field" data-tags-field>
+  <legend>{{ S('tags_label') }} <span class="hint">{{ S('tags_hint_optional') }}</span></legend>
+  <div class="chips">
     {% for t in tags %}
-    <label class="tag-check"><input type="checkbox" name="tags" value="{{ t['id'] }}"
-      {% if t['id']|string in selected_tags|map('string')|list %}checked{% endif %}> {{ t['name_hy'] }}</label>
+    <label class="chip" data-name="{{ t['name_hy']|lower }}">
+      <input type="checkbox" name="tags" value="{{ t['id'] }}"{% if t['id']|string in selected_tags|map('string')|list %} checked{% endif %}>
+      <span>{{ t['name_hy'] }}{% if t['translated_count'] < TRANSLATION_TOTAL %}<i class="chip-dot" title="{{ S('tag_untranslated_tip') }}"></i>{% endif %}</span>
+    </label>
     {% endfor %}
+    {% for n in pending_tags %}
+    <label class="chip pending" data-name="{{ n|lower }}"><input type="checkbox" name="new_tags" value="{{ n }}" checked><span>{{ n }}</span></label>
+    {% endfor %}
+    <button type="button" class="chip-add" data-add-open>{{ S('add_tag') }}</button>
+    <span class="chip-add-box" hidden>
+      <input type="text" data-add-input placeholder="{{ S('add_tag_placeholder') }}" maxlength="80" autocomplete="off">
+      <button type="button" class="chip-add-ok" data-add-ok title="{{ S('add_tag_confirm_title') }}">✓</button>
+    </span>
   </div>
-  {% else %}<p class="hint">No tags yet — add the first one below.</p>{% endif %}
-  <label>➕ Add new… <span class="hint">(Armenian; separate several with commas — an existing name is reused)</span>
-    <input type="text" name="new_tags" value="{{ new_tags or '' }}" placeholder="e.g. Հանքանյութեր, Գործիքներ" autocomplete="off">
-  </label>
+  <p class="hint" data-add-help hidden>{{ S('add_tag_help') }}</p>
+  {% if not tags and not pending_tags %}<p class="hint">{{ S('tags_empty') }}</p>{% endif %}
 </fieldset>
+<script>
+(function () {
+  document.querySelectorAll('[data-tags-field]').forEach(function (box) {
+    if (box.dataset.ready) return; box.dataset.ready = '1';
+    var open = box.querySelector('[data-add-open]'), wrap = box.querySelector('.chip-add-box'),
+        inp = box.querySelector('[data-add-input]'), ok = box.querySelector('[data-add-ok]'),
+        help = box.querySelector('[data-add-help]'), row = box.querySelector('.chips');
+    function show() { open.hidden = true; wrap.hidden = false; help.hidden = false; inp.focus(); }
+    function hide() { wrap.hidden = true; help.hidden = true; open.hidden = false; inp.value = ''; }
+    function addNames() {
+      inp.value.split(/[,;\n\u060c]/).map(function (x) { return x.trim().replace(/\s+/g, ' '); })
+        .filter(Boolean).forEach(function (name) {
+          var key = name.toLowerCase();
+          var same = Array.prototype.find.call(box.querySelectorAll('.chip'), function (c) { return c.dataset.name === key; });
+          if (same) { same.querySelector('input').checked = true; return; }       // duplicate -> reuse + select
+          var label = document.createElement('label'); label.className = 'chip pending'; label.dataset.name = key;
+          var cb = document.createElement('input'); cb.type = 'checkbox'; cb.name = 'new_tags'; cb.value = name; cb.checked = true;
+          var sp = document.createElement('span'); sp.textContent = name;
+          label.appendChild(cb); label.appendChild(sp); row.insertBefore(label, open);
+        });
+      inp.value = ''; inp.focus();
+    }
+    open.addEventListener('click', show);
+    ok.addEventListener('click', addNames);
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); addNames(); } else if (e.key === 'Escape') { hide(); }
+    });
+  });
+})();
+</script>

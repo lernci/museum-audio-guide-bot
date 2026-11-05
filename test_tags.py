@@ -14,6 +14,9 @@ os.environ.pop("TAGS_SOFT_LIMIT", None)
 from db import db, migrate
 from bot import visitor
 from worker import tags as tagmod
+from webapp.strings import S
+from urllib.parse import unquote_plus
+import json
 
 OTHERS = db.TRANSLATION_LANGS
 
@@ -240,11 +243,11 @@ async def test_web():
         r = await run(cl.post, "/exhibits/003/tags", data={"tags": [str(tags["Գործիքներ"])], "new_tags": ""})
         assert r.status_code == 303 and await db.get_exhibit_tag_ids("003") == [tags["Գործիքներ"]]
         assert (await db.get_exhibit("003"))["updated_at"].startswith("2000")
-        assert "Save tags" in (await run(cl.get, "/exhibits/003")).text
+        assert S("save_tags") in (await run(cl.get, "/exhibits/003")).text
 
         # dashboard: tags column + any-match filter
         html = (await run(cl.get, "/")).text
-        assert "<th>Tags</th>" in html and "Հանքանյութեր" in html
+        assert f"<th>{S('col_tags')}</th>" in html and "Հանքանյութեր" in html
         only = (await run(cl.get, "/", params=[("tag", fos)])).text
         assert ">001<" not in only and ">003<" not in only                      # fossils tag has no exhibits now
         any_ = (await run(cl.get, "/", params=[("tag", tags["Հանքանյութեր"]), ("tag", tags["Գործիքներ"])])).text
@@ -254,11 +257,14 @@ async def test_web():
 
         # tag management page: counts, translation status, confirm text with usage count
         page = (await run(cl.get, "/tags")).text
-        assert "untranslated (0/9)" in page and "translated" in page and "Translate missing" in page
-        assert "2 exhibit(s) currently use it" in page and "exhibits are NOT deleted" in page
+        assert S("untranslated", n=0, total=9) in page and S("translated") in page and S("translate_missing") in page
+        # confirm dialogs state the usage count (JSON-escaped inside the onsubmit attribute)
+        t_min = (await db.find_tag_by_name("Հանքանյութեր"))
+        assert json.dumps(S("confirm_delete", name="Հանքանյութեր", n=2)) in page
+        assert json.dumps(S("confirm_merge", name="Հանքանյութեր", n=2)) in page
         # rename (dup refused), merge, delete, translate-missing, per-tag retry
         r = await run(cl.post, f"/tags/{tags['Գործիքներ']}/rename", data={"name_hy": "ՀԱՆՔԱՆՅՈՒԹԵՐ"})
-        assert "already+exists" in r.headers["location"] or "already%20exists" in r.headers["location"]
+        assert S("err_tag_dup", name="ՀԱՆՔԱՆՅՈՒԹԵՐ") in unquote_plus(r.headers["location"])
         r = await run(cl.post, f"/tags/{tags['Գործիքներ']}/rename", data={"name_hy": "Գործիքներ և սարքեր"})
         assert (await db.get_tag(tags["Գործիքներ"]))["name_hy"] == "Գործիքներ և սարքեր" and FT.calls[-1] == "Գործիքներ և սարքեր"
         r = await run(cl.post, "/tags/translate-missing")
@@ -266,7 +272,7 @@ async def test_web():
         r = await run(cl.post, f"/tags/{fos}/merge", data={"into": str(tags["Հանքանյութեր"])})
         assert await db.get_tag(fos) is None
         r = await run(cl.post, f"/tags/{tags['Հանքանյութեր']}/delete")
-        assert "2+exhibit" in r.headers["location"] or "2%20exhibit" in r.headers["location"]
+        assert S("msg_tag_deleted", n=2) in unquote_plus(r.headers["location"])
         assert await db.get_tag(tags["Հանքանյութեր"]) is None and {e["id"] for e in await db.list_exhibits()} == {"001", "002", "003"}
 
         # soft-limit advisory shown after creating beyond the limit

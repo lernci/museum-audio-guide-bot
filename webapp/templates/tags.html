@@ -1,59 +1,57 @@
 {% extends "base.html" %}
-{% block title %}Tags — Museum Audio Guide Admin{% endblock %}
+{% block title %}{{ S('tags_page_title') }} — {{ S('panel_name') }}{% endblock %}
 {% block content %}
-<div class="page-header"><h1>Tags</h1></div>
+<div class="page-header"><h1>{{ S('tags_page_title') }}</h1></div>
 {% if message %}<p class="ok">{{ message }}</p>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if tags_advisory %}<p class="notice">{{ tags_advisory }}</p>{% endif %}
-<p class="hint">Tags are entered in Armenian; each is automatically translated into the other 9 languages for visitors
-  (a failed translation never blocks saving — the tag shows as untranslated and visitors see the Armenian name until it succeeds).
-  Soft limit: {{ soft_limit }} tags.</p>
+<p class="hint">{{ S('tags_intro', limit=soft_limit) }}</p>
 
 <form method="post" action="{{ request.url_for('tag_create') }}" class="inline-form">
-  <input type="text" name="name_hy" placeholder="New tag (Armenian)" maxlength="80" required>
-  <button class="btn" type="submit">➕ Add tag</button>
+  <input type="text" name="name_hy" placeholder="{{ S('new_tag_placeholder') }}" maxlength="80" required>
+  <button class="btn" type="submit">{{ S('add_tag_btn') }}</button>
 </form>
 <form method="post" action="{{ request.url_for('tags_translate_missing') }}" class="inline-form">
-  <button class="btn" type="submit">Translate missing</button>
+  <button class="btn" type="submit">{{ S('translate_missing') }}</button>
 </form>
 
-{% if not tags %}<p class="empty">No tags yet.</p>{% else %}
+{% if not tags %}<p class="empty">{{ S('no_tags') }}</p>{% else %}
 <table class="exhibit-table">
-  <thead><tr><th>Tag</th><th>Exhibits</th><th>Translations</th><th>Rename</th><th>Merge into</th><th></th></tr></thead>
+  <thead><tr><th>{{ S('col_tag') }}</th><th>{{ S('col_exhibits') }}</th><th>{{ S('col_translations') }}</th><th>{{ S('col_rename') }}</th><th>{{ S('col_merge') }}</th><th></th></tr></thead>
   <tbody>
   {% for t in tags %}
   <tr>
     <td><strong>{{ t['name_hy'] }}</strong></td>
     <td>{{ t['exhibit_count'] }}</td>
     <td>
-      {% if t['translated_count'] >= expected_translations %}<span class="badge badge-live">translated</span>
-      {% else %}<span class="badge badge-stale">untranslated ({{ t['translated_count'] }}/{{ expected_translations }})</span>
+      {% if t['translated_count'] >= expected_translations %}<span class="badge badge-live">{{ S('translated') }}</span>
+      {% else %}<span class="badge badge-stale">{{ S('untranslated', n=t['translated_count'], total=expected_translations) }}</span>
         <form method="post" action="{{ request.url_for('tag_translate', tag_id=t['id']) }}" class="inline-form">
-          <button class="link-btn" type="submit">Retry</button></form>
+          <button class="link-btn" type="submit">{{ S('retry') }}</button></form>
       {% endif %}
     </td>
     <td>
       <form method="post" action="{{ request.url_for('tag_rename', tag_id=t['id']) }}" class="inline-form">
         <input type="text" name="name_hy" value="{{ t['name_hy'] }}" maxlength="80" required>
-        <button class="link-btn" type="submit">Rename</button>
+        <button class="link-btn" type="submit">{{ S('rename_btn') }}</button>
       </form>
     </td>
     <td>
       {% if tags|length > 1 %}
       <form method="post" action="{{ request.url_for('tag_merge', tag_id=t['id']) }}" class="inline-form"
-            onsubmit="return confirm('Merge “{{ t['name_hy']|e }}” into the selected tag? Its {{ t['exhibit_count'] }} exhibit(s) are reassigned and this tag is removed.');">
+            onsubmit='return confirm({{ S("confirm_merge", name=t["name_hy"], n=t["exhibit_count"])|tojson }});'>
         <select name="into" required>
-          <option value="">— choose —</option>
+          <option value="">{{ S('choose') }}</option>
           {% for o in tags if o['id'] != t['id'] %}<option value="{{ o['id'] }}">{{ o['name_hy'] }}</option>{% endfor %}
         </select>
-        <button class="link-btn" type="submit">Merge</button>
+        <button class="link-btn" type="submit">{{ S('merge_btn') }}</button>
       </form>
       {% endif %}
     </td>
     <td>
       <form method="post" action="{{ request.url_for('tag_delete', tag_id=t['id']) }}" class="inline-form"
-            onsubmit="return confirm('Delete “{{ t['name_hy']|e }}”? {{ t['exhibit_count'] }} exhibit(s) currently use it. Only the tag and its links are deleted — the exhibits are NOT deleted.');">
-        <button class="link-btn danger" type="submit">Delete</button>
+            onsubmit='return confirm({{ S("confirm_delete", name=t["name_hy"], n=t["exhibit_count"])|tojson }});'>
+        <button class="link-btn danger" type="submit">{{ S('delete_btn') }}</button>
       </form>
     </td>
   </tr>

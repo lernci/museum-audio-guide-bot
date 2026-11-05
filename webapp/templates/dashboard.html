@@ -1,28 +1,29 @@
 {% extends "base.html" %}
-{% block title %}Exhibits — Museum Audio Guide Admin{% endblock %}
+{% block title %}{{ S('exhibits') }} — {{ S('panel_name') }}{% endblock %}
 {% block content %}
 <div class="page-header">
-  <h1>Exhibits</h1>
-  <a class="btn" href="{{ request.url_for('exhibit_new_form') }}">+ New exhibit</a>
+  <h1>{{ S('exhibits') }}</h1>
+  <a class="btn" href="{{ request.url_for('exhibit_new_form') }}">{{ S('new_exhibit_btn') }}</a>
 </div>
 
-<form method="get" class="filter-form" style="margin-bottom:1rem">
-  <span>Filter by tag <span class="hint">(shows exhibits with ANY ticked tag)</span>:</span>
-  {% for t in tags %}
-  <label class="tag-check"><input type="checkbox" name="tag" value="{{ t['id'] }}"
-    {% if t['id']|string in selected_tags %}checked{% endif %}> {{ t['name_hy'] }}</label>
-  {% endfor %}
-  <button class="btn" type="submit">Filter</button>
-  {% if selected_tags %}<a href="{{ request.url_for('dashboard') }}">clear</a>{% endif %}
-  · <a href="{{ request.url_for('tags_page') }}">Manage tags</a>
+<form method="get" class="filter-form">
+  <span>{{ S('filter_by_tag') }} <span class="hint">{{ S('filter_any_hint') }}</span></span>
+  <div class="chips">
+    {% for t in tags %}
+    <label class="chip"><input type="checkbox" name="tag" value="{{ t['id'] }}"{% if t['id']|string in selected_tags %} checked{% endif %}><span>{{ t['name_hy'] }}</span></label>
+    {% endfor %}
+    <button class="btn" type="submit">{{ S('filter_btn') }}</button>
+    {% if selected_tags %}<a href="{{ request.url_for('dashboard') }}">{{ S('clear') }}</a>{% endif %}
+    <a href="{{ request.url_for('tags_page') }}">{{ S('manage_tags') }}</a>
+  </div>
 </form>
 
 {% if not exhibits %}
-<p class="empty">No exhibits yet.</p>
+<p class="empty">{{ S('no_exhibits') }}</p>
 {% else %}
 <table class="exhibit-table">
   <thead>
-    <tr><th>ID</th><th>Title</th><th>Tags</th><th>Status</th><th>Updated</th></tr>
+    <tr><th>{{ S('col_id') }}</th><th>{{ S('col_title') }}</th><th>{{ S('col_tags') }}</th><th>{{ S('col_status') }}</th><th>{{ S('col_updated') }}</th></tr>
   </thead>
   <tbody>
     {% for e in exhibits %}
@@ -30,7 +31,7 @@
       <td><a href="{{ request.url_for('exhibit_detail', exhibit_id=e['id']) }}">{{ e['id'] }}</a></td>
       <td>{{ e['title_am'] }}</td>
       <td>{{ e['tag_names'] or '—' }}</td>
-      <td><span class="badge badge-{{ e['status'] }}">{{ e['status'] }}</span></td>
+      <td><span class="badge badge-{{ e['status'] }}">{{ status_label(e['status']) }}</span></td>
       <td>{{ e['updated_at'] }}</td>
     </tr>
     {% endfor %}
@@ -39,9 +40,9 @@
 {% endif %}
 
 <section class="entrance-qr" style="margin-top:2rem">
-  <h2>Museum entrance QR</h2>
-  <p>Opens the bot without an exhibit (language menu, then visitors type an exhibit number). For printing at the entrance.</p>
-  <img src="{{ request.url_for('media_entrance_qr') }}" alt="Museum entrance QR" width="180" height="180">
-  <p><a class="btn" href="{{ request.url_for('media_entrance_qr') }}?download=1">Download PNG</a></p>
+  <h2>{{ S('entrance_qr_title') }}</h2>
+  <p>{{ S('entrance_qr_text') }}</p>
+  <img src="{{ request.url_for('media_entrance_qr') }}" alt="{{ S('entrance_qr_alt') }}" width="180" height="180">
+  <p><a class="btn" href="{{ request.url_for('media_entrance_qr') }}?download=1">{{ S('download_png') }}</a></p>
 </section>
 {% endblock %}

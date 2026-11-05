@@ -11,6 +11,8 @@ os.environ.update(WEBAPP_ADMIN_USER="t", WEBAPP_SESSION_SECRET="s",
 from db import db, migrate
 from worker import pipeline
 from worker.prompts import LANGUAGES
+from webapp.strings import S
+from urllib.parse import unquote_plus
 from dry_run import FakeBot, fake_synthesize
 
 OTHERS = [c for c in LANGUAGES if c != "am"]
@@ -157,7 +159,7 @@ async def test_web():
         with mock.patch.object(pipeline, "generate_scripts_draft", gen):
             r = await run(cl.post, "/exhibits/001/generate-scripts", data={})
             assert r.status_code == 303 and "generate_error" in r.headers["location"] and not gen.called
-            assert "Translate" in r.headers["location"] or "overwrite" in r.headers["location"].lower() or "overwrite" in __import__("urllib.parse").parse.unquote(r.headers["location"]).lower()
+            assert S("err_overwrite_needed") in unquote_plus(r.headers["location"])
             r = await run(cl.post, "/exhibits/001/generate-scripts", data={"confirm_overwrite": "1"})
             assert gen.called and "generate_error" not in r.headers["location"]
             gen.reset_mock()
@@ -165,17 +167,17 @@ async def test_web():
             assert gen.called and "generate_error" not in r.headers["location"]
 
         page = (await run(cl.get, "/exhibits/001")).text
-        assert "/translate-from-armenian" in page and "full redo" in page and "confirm(" in page
+        assert "/translate-from-armenian" in page and S("gen_scripts_redo") in page and "confirm(" in page
         assert "/translate-from-armenian" not in (await run(cl.get, "/exhibits/002")).text   # no Armenian script yet
         await db.save_draft_script_manual("001", "am", "T", "edited am")
         page = (await run(cl.get, "/exhibits/001")).text
-        assert page.count('badge-stale">Armenian changed — retranslate') == 9      # 9 card badges
-        assert page.count("Armenian changed — retranslate") == 18                  # + 9 publish-blocking list entries
+        assert page.count(f'badge-stale">{S("stale_armenian")}') == 9              # 9 card badges
+        assert page.count("հայերենը փոխվել է — վերաթարգմանեք") == 9               # + 9 publish-blocking list entries (lowercase)
         r = await run(cl.post, "/exhibits/001/translate-from-armenian")
         assert r.status_code == 303 and "generate_error" not in r.headers["location"]
         rows = await db.get_all_audio_rows("001")
         assert all(rows[c]["script_stale"] == 0 for c in OTHERS) and rows["am"]["draft_script_text"] == "edited am"
-        assert "Armenian changed" not in (await run(cl.get, "/exhibits/001")).text
+        assert S("stale_armenian") not in (await run(cl.get, "/exhibits/001")).text
         r = await run(cl.post, "/exhibits/002/translate-from-armenian")
         assert "generate_error" in r.headers["location"]
     print("web: overwrite confirmation (server-side guard), Translate button visibility, badges, route OK")

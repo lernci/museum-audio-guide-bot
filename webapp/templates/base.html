@@ -1,18 +1,18 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="hy">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Museum Audio Guide Admin{% endblock %}</title>
+  <title>{% block title %}{{ S('panel_name') }}{% endblock %}</title>
   <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="{{ request.url_for('dashboard') }}">Goris Museum — Exhibits</a>
+    <a class="brand" href="{{ request.url_for('dashboard') }}">{{ S('brand') }}</a>
     {% if request.session.get('webapp_user') %}
-    <a class="nav-link" href="{{ request.url_for('tags_page') }}">Tags</a>
+    <a class="nav-link" href="{{ request.url_for('tags_page') }}">{{ S('nav_tags') }}</a>
     <form method="post" action="{{ request.url_for('logout') }}" class="logout-form">
-      <button type="submit" class="link-btn">Log out</button>
+      <button type="submit" class="link-btn">{{ S('logout') }}</button>
     </form>
     {% endif %}
   </header>
